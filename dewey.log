@@ -1,0 +1,3 @@
+2026-08-17T17:25:21.796314Z  INFO dewey: Starting Dewey TUI Library Manager
+2026-08-17T17:25:21.796682Z  INFO dewey: Connecting to SQLite database db="dewey.db"
+2026-08-17T21:47:10.854317Z  INFO dewey: Dewey exited cleanly
