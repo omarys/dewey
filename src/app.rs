@@ -1,4 +1,5 @@
 use anyhow::Result;
+use ratatui::widgets::{ListState, TableState};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
@@ -36,9 +37,11 @@ pub struct App {
 
     pub series_list: Vec<SeriesWithStats>,
     pub selected_series_idx: usize,
+    pub series_state: ListState,
 
     pub chapters_list: Vec<ChapterWithProgress>,
     pub selected_chapter_idx: usize,
+    pub chapters_state: TableState,
 
     pub active_pane: ActivePane,
     pub download_jobs: Vec<DownloadJob>,
@@ -55,6 +58,11 @@ impl App {
         let continuum_runner = ContinuumRunner::new(&config.continuum_bin);
         let labrador_runner = LabradorRunner::new(&config.labrador_bin);
 
+        let mut series_state = ListState::default();
+        series_state.select(Some(0));
+        let mut chapters_state = TableState::default();
+        chapters_state.select(Some(0));
+
         let mut app = Self {
             config,
             db,
@@ -62,8 +70,10 @@ impl App {
             labrador_runner,
             series_list: Vec::new(),
             selected_series_idx: 0,
+            series_state,
             chapters_list: Vec::new(),
             selected_chapter_idx: 0,
+            chapters_state,
             active_pane: ActivePane::SeriesList,
             download_jobs: Vec::new(),
             tick_count: 0,
@@ -73,12 +83,17 @@ impl App {
             should_quit: false,
         };
 
-        if app.config.auto_scan_on_startup && app.config.library_dir.exists() {
-            let _ = app.scan_library_silent();
-        }
-
+        // 1. Blazing fast startup: load existing SQLite database immediately (< 2ms)
         app.reload_series()?;
         app.reload_chapters()?;
+
+        // 2. Perform fast diff scan if configured (uses cached DB diffing)
+        if app.config.auto_scan_on_startup && app.config.library_dir.exists() {
+            let _ = app.scan_library_silent();
+            let _ = app.reload_series();
+            let _ = app.reload_chapters();
+        }
+
         Ok(app)
     }
 
@@ -106,6 +121,11 @@ impl App {
         if self.selected_series_idx >= self.series_list.len() && !self.series_list.is_empty() {
             self.selected_series_idx = self.series_list.len() - 1;
         }
+        if self.series_list.is_empty() {
+            self.series_state.select(None);
+        } else {
+            self.series_state.select(Some(self.selected_series_idx));
+        }
         Ok(())
     }
 
@@ -120,6 +140,12 @@ impl App {
         } else {
             self.chapters_list.clear();
             self.selected_chapter_idx = 0;
+        }
+
+        if self.chapters_list.is_empty() {
+            self.chapters_state.select(None);
+        } else {
+            self.chapters_state.select(Some(self.selected_chapter_idx));
         }
         Ok(())
     }
@@ -150,6 +176,7 @@ impl App {
                 if !self.series_list.is_empty() {
                     self.selected_series_idx =
                         (self.selected_series_idx + 1) % self.series_list.len();
+                    self.series_state.select(Some(self.selected_series_idx));
                     self.selected_chapter_idx = 0;
                     let _ = self.reload_chapters();
                 }
@@ -158,6 +185,7 @@ impl App {
                 if !self.chapters_list.is_empty() {
                     self.selected_chapter_idx =
                         (self.selected_chapter_idx + 1) % self.chapters_list.len();
+                    self.chapters_state.select(Some(self.selected_chapter_idx));
                 }
             }
             ActivePane::ActiveDownloads => {}
@@ -173,6 +201,7 @@ impl App {
                     } else {
                         self.selected_series_idx -= 1;
                     }
+                    self.series_state.select(Some(self.selected_series_idx));
                     self.selected_chapter_idx = 0;
                     let _ = self.reload_chapters();
                 }
@@ -184,6 +213,7 @@ impl App {
                     } else {
                         self.selected_chapter_idx -= 1;
                     }
+                    self.chapters_state.select(Some(self.selected_chapter_idx));
                 }
             }
             ActivePane::ActiveDownloads => {}

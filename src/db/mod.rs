@@ -7,8 +7,25 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use models::{Chapter, ChapterWithProgress, Progress, Series, SeriesStats, SeriesWithStats};
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone)]
+pub struct ChapterScanEntry {
+    pub chapter_number: f64,
+    pub file_path: String,
+    pub page_count: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExistingChapterInfo {
+    pub id: i64,
+    pub chapter_number: f64,
+    pub page_count: Option<i64>,
+}
+
+pub type ExistingChaptersMap = HashMap<String, ExistingChapterInfo>;
 
 #[derive(Clone)]
 pub struct Database {
@@ -51,6 +68,10 @@ impl Database {
         // Run non-destructive column migrations if existing database is missing fetch_url
         let _ = conn.execute("ALTER TABLE series ADD COLUMN fetch_url TEXT", []);
         let _ = conn.execute("ALTER TABLE chapters ADD COLUMN fetch_url TEXT", []);
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path)",
+            [],
+        );
         Ok(())
     }
 
@@ -246,6 +267,76 @@ impl Database {
         )?;
 
         Ok(chapter_id)
+    }
+
+    /// Fast indexed lookup of known chapters for diffing during scans
+    pub fn get_existing_chapters_by_path(&self, series_id: i64) -> Result<ExistingChaptersMap> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, chapter_number, file_path, page_count FROM chapters WHERE series_id = ?1 AND file_path IS NOT NULL",
+        )?;
+
+        let mut map = HashMap::new();
+        let rows = stmt.query_map(params![series_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+
+        for row in rows.flatten() {
+            map.insert(
+                row.2,
+                ExistingChapterInfo {
+                    id: row.0,
+                    chapter_number: row.1,
+                    page_count: row.3,
+                },
+            );
+        }
+
+        Ok(map)
+    }
+
+    /// Batch insert or update scanned chapters in a single atomic transaction.
+    /// Reduces 1,000 separate disk syncs to 1 single transaction on slow storage.
+    pub fn batch_record_chapters(
+        &self,
+        series_id: i64,
+        chapters: &[ChapterScanEntry],
+    ) -> Result<usize> {
+        if chapters.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut count = 0;
+
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO chapters (series_id, chapter_number, file_path, page_count, fetch_url)
+                 VALUES (?1, ?2, ?3, ?4, NULL)
+                 ON CONFLICT(series_id, chapter_number) DO UPDATE SET
+                    file_path = ?3,
+                    page_count = COALESCE(?4, page_count)",
+            )?;
+
+            for entry in chapters {
+                stmt.execute(params![
+                    series_id,
+                    entry.chapter_number,
+                    entry.file_path,
+                    entry.page_count,
+                ])?;
+                count += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(count)
     }
 
     pub fn update_series_fetch_url(&self, series_id: i64, fetch_url: &str) -> Result<()> {
@@ -550,5 +641,31 @@ mod tests {
         let (_, prog2) = db.get_progress_for_file(test_file).unwrap().unwrap();
         assert_eq!(prog2.last_page_read, 35);
         assert!(!prog2.is_completed);
+    }
+
+    #[test]
+    fn test_batch_record_chapters_and_diff() {
+        let db = Database::in_memory().unwrap();
+        let series_id = db.insert_or_get_series("Diff Test Series").unwrap();
+
+        let entries = vec![
+            ChapterScanEntry {
+                chapter_number: 1.0,
+                file_path: "/manga/ch01.cbz".to_string(),
+                page_count: Some(45),
+            },
+            ChapterScanEntry {
+                chapter_number: 2.0,
+                file_path: "/manga/ch02.cbz".to_string(),
+                page_count: Some(50),
+            },
+        ];
+
+        let recorded = db.batch_record_chapters(series_id, &entries).unwrap();
+        assert_eq!(recorded, 2);
+
+        let map = db.get_existing_chapters_by_path(series_id).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("/manga/ch01.cbz").unwrap().page_count, Some(45));
     }
 }

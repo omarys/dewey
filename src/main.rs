@@ -149,8 +149,8 @@ async fn main() -> Result<()> {
 
     // 3. Main Ratatui event loop
     while !app.should_quit {
-        // Render UI frame
-        tui.terminal_mut().draw(|f| ui::render(f, &app))?;
+        // Render UI frame with stateful widget support
+        tui.terminal_mut().draw(|f| ui::render(f, &mut app))?;
 
         // Await next event from input stream or background async tasks
         if let Some(event) = event_handler.next().await {

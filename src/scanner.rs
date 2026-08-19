@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use crate::db::Database;
+use crate::db::{ChapterScanEntry, Database};
 
 #[derive(Debug, Default, Clone)]
 pub struct ScanSummary {
@@ -19,7 +19,8 @@ pub struct ScanSummary {
 pub struct LibraryScanner;
 
 impl LibraryScanner {
-    /// Scans the designated library directory and synchronizes it with SQLite
+    /// Scans the designated library directory and synchronizes it with SQLite.
+    /// Uses cached database diffing to avoid re-opening existing .cbz files.
     pub fn scan_directory(db: &Database, library_dir: &Path) -> Result<ScanSummary> {
         if !library_dir.exists() {
             fs::create_dir_all(library_dir)?;
@@ -69,7 +70,7 @@ impl LibraryScanner {
                     }
                 }
 
-                // 2. Scan chapter files inside the series directory
+                // 2. Scan chapter files inside the series directory using fast diff
                 let (ch_count, new_count) = Self::scan_series_directory(db, series_id, &path)?;
                 summary.chapters_found += ch_count;
                 summary.new_chapters_added += new_count;
@@ -91,24 +92,37 @@ impl LibraryScanner {
         series_id: i64,
         series_dir: &Path,
     ) -> Result<(usize, usize)> {
+        let existing_map = db.get_existing_chapters_by_path(series_id)?;
         let entries = fs::read_dir(series_dir)?;
         let mut chapters_found = 0;
-        let mut new_chapters_added = 0;
+        let mut to_insert = Vec::new();
 
         for entry in entries.flatten() {
             let path = entry.path();
             if Self::is_chapter_file(&path) || (path.is_dir() && !Self::is_special_dir(&path)) {
                 if let Some(chap_num) = Self::parse_chapter_number(&path) {
                     chapters_found += 1;
-                    let page_count = Self::detect_page_count(&path);
                     let path_str = path.to_string_lossy().to_string();
 
-                    db.record_chapter_download(series_id, chap_num, &path_str, page_count, None)?;
-                    new_chapters_added += 1;
+                    // Diff check: if file is already indexed with page_count, skip opening zip
+                    if let Some(info) = existing_map.get(&path_str) {
+                        if info.page_count.is_some() {
+                            continue;
+                        }
+                    }
+
+                    // New or uncounted chapter -> open archive once
+                    let page_count = Self::detect_page_count(&path);
+                    to_insert.push(ChapterScanEntry {
+                        chapter_number: chap_num,
+                        file_path: path_str,
+                        page_count,
+                    });
                 }
             }
         }
 
+        let new_chapters_added = db.batch_record_chapters(series_id, &to_insert)?;
         Ok((chapters_found, new_chapters_added))
     }
 

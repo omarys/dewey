@@ -1,5 +1,8 @@
 pub const CREATE_SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA temp_store = MEMORY;
 
 CREATE TABLE IF NOT EXISTS series (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,5 +32,6 @@ CREATE TABLE IF NOT EXISTS progress (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chapters_series_id ON chapters(series_id);
+CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path);
 CREATE INDEX IF NOT EXISTS idx_progress_last_read ON progress(last_read_at);
 "#;

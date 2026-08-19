@@ -65,7 +65,7 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(p, area);
 }
 
-pub fn render_series_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let is_focused = app.active_pane == ActivePane::SeriesList;
     let border_style = if is_focused {
         theme.active_border()
@@ -148,18 +148,20 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(border_style)
-            .title(Span::styled(" 1. Series Library ", title_style)),
-    );
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(border_style)
+                .title(Span::styled(" 1. Series Library ", title_style)),
+        )
+        .highlight_style(theme.selected_item());
 
-    f.render_widget(list, area);
+    f.render_stateful_widget(list, area, &mut app.series_state);
 }
 
-pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let is_focused = app.active_pane == ActivePane::ChaptersList;
     let border_style = if is_focused {
         theme.active_border()
@@ -252,18 +254,21 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme)
             .add_modifier(Modifier::UNDERLINED),
     );
 
-    let table = Table::new(rows, widths).header(header).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(border_style)
-            .title(Span::styled(
-                format!(" 2. Chapters — {} ", series_title),
-                title_style,
-            )),
-    );
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(border_style)
+                .title(Span::styled(
+                    format!(" 2. Chapters — {} ", series_title),
+                    title_style,
+                )),
+        )
+        .row_highlight_style(theme.selected_item());
 
-    f.render_widget(table, area);
+    f.render_stateful_widget(table, area, &mut app.chapters_state);
 }
 
 pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -552,7 +557,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  d                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Fetch selected chapter via Labrador (passes or resolves URL)"),
+            Span::raw("Fetch selected chapter via Labrador"),
         ]),
         Line::from(vec![
             Span::styled(

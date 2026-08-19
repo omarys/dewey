@@ -49,14 +49,13 @@ impl ContinuumRunner {
         }
     }
 
-    /// Builds the Command configured with --file, --page, and --tui flags.
+    /// Builds the Command configured with clean --file and --page flags.
     pub fn build_command(&self, file_path: &Path, last_page: i64) -> Command {
         let mut cmd = Command::new(&self.binary_path);
         cmd.arg("--file")
             .arg(file_path)
             .arg("--page")
             .arg(last_page.to_string())
-            .arg("--tui")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd
@@ -74,7 +73,6 @@ impl ContinuumRunner {
             binary = ?self.binary_path,
             file = ?file_path,
             page = last_page,
-            flags = "--tui",
             "Launching Continuum reader process"
         );
 
@@ -149,7 +147,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_command_contains_tui_flag() {
+    fn test_build_command_clean_args() {
         let runner = ContinuumRunner::new("continuum");
         let test_path = Path::new("/tmp/test.cbz");
         let cmd = runner.build_command(test_path, 42);
@@ -159,10 +157,7 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
 
-        assert_eq!(
-            args,
-            vec!["--file", "/tmp/test.cbz", "--page", "42", "--tui"]
-        );
+        assert_eq!(args, vec!["--file", "/tmp/test.cbz", "--page", "42"]);
     }
 
     #[test]

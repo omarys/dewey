@@ -13,7 +13,7 @@ use components::{
 };
 use theme::Theme;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     let theme = Theme::default();
 
     let main_chunks = Layout::default()
