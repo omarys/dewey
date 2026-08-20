@@ -5,9 +5,24 @@ use regex::Regex;
 use serde_json::Value;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tracing::info;
 
 use crate::db::{ChapterScanEntry, Database};
+
+static RE_CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:chapter|chap|ch|\bc|#)[_\s\.]*([0-9]+(?:\.[0-9]+)?)"#)
+        .expect("invalid regex")
+});
+static RE_BRACKET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\[([0-9]+(?:\.[0-9]+)?)\]"#).expect("invalid regex"));
+static RE_SEP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:[-_]\s*)([0-9]+(?:\.[0-9]+)?)(?:$|\s|\.)"#).expect("invalid regex")
+});
+static RE_PURE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s*([0-9]+(?:\.[0-9]+)?)\s*$"#).expect("invalid regex"));
+static RE_ANY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\b([0-9]+(?:\.[0-9]+)?)\b"#).expect("invalid regex"));
 
 #[derive(Debug, Default, Clone)]
 pub struct ScanSummary {
@@ -20,7 +35,7 @@ pub struct LibraryScanner;
 
 impl LibraryScanner {
     /// Scans the designated library directory and synchronizes it with SQLite.
-    /// Uses cached database diffing to avoid re-opening existing .cbz files.
+    /// Uses cached database diffing and precompiled regexes for maximum performance.
     pub fn scan_directory(db: &Database, library_dir: &Path) -> Result<ScanSummary> {
         if !library_dir.exists() {
             fs::create_dir_all(library_dir)?;
@@ -164,22 +179,6 @@ impl LibraryScanner {
             }
         }
 
-        // Search for any .jpg / .png named cover*
-        if let Ok(entries) = fs::read_dir(series_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let file_name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_lowercase())
-                        .unwrap_or_default();
-                    if file_name.starts_with("cover") || file_name.starts_with("folder") {
-                        return Some(path);
-                    }
-                }
-            }
-        }
-
         None
     }
 
@@ -224,21 +223,12 @@ impl LibraryScanner {
         })
     }
 
-    /// Robust chapter number parsing supporting:
-    /// - "[0001]_Chapter_1.cbz" -> 1.0
-    /// - "[0105]_Chapter_105.cbz" -> 105.0
-    /// - "Solo Leveling - c105.cbz" -> 105.0
-    /// - "Ch. 12.5.zip" -> 12.5
-    /// - "Chapter_045.cbz" -> 45.0
-    /// - "v02_c015.cbz" -> 15.0
-    /// - "105.cbz" -> 105.0
+    /// Robust chapter number parsing using static precompiled regexes
     pub fn parse_chapter_number(path: &Path) -> Option<f64> {
         let file_stem = path.file_stem()?.to_string_lossy();
 
         // Pattern 1: Look explicitly for "chapter_105" or "chapter 105" or "c105"
-        let re_chapter =
-            Regex::new(r#"(?i)(?:chapter|chap|ch|\bc|#)[_\s\.]*([0-9]+(?:\.[0-9]+)?)"#).ok()?;
-        if let Some(caps) = re_chapter.captures(&file_stem) {
+        if let Some(caps) = RE_CHAPTER.captures(&file_stem) {
             if let Some(m) = caps.get(1) {
                 if let Ok(num) = m.as_str().parse::<f64>() {
                     return Some(num);
@@ -247,8 +237,7 @@ impl LibraryScanner {
         }
 
         // Pattern 2: Bracket prefix index like [0045]
-        let re_bracket = Regex::new(r#"\[([0-9]+(?:\.[0-9]+)?)\]"#).ok()?;
-        if let Some(caps) = re_bracket.captures(&file_stem) {
+        if let Some(caps) = RE_BRACKET.captures(&file_stem) {
             if let Some(m) = caps.get(1) {
                 if let Ok(num) = m.as_str().parse::<f64>() {
                     return Some(num);
@@ -257,8 +246,7 @@ impl LibraryScanner {
         }
 
         // Pattern 3: Separator then number: " - 105", "_105"
-        let re_sep = Regex::new(r#"(?:[-_]\s*)([0-9]+(?:\.[0-9]+)?)(?:$|\s|\.)"#).ok()?;
-        if let Some(caps) = re_sep.captures(&file_stem) {
+        if let Some(caps) = RE_SEP.captures(&file_stem) {
             if let Some(m) = caps.get(1) {
                 if let Ok(num) = m.as_str().parse::<f64>() {
                     return Some(num);
@@ -267,8 +255,7 @@ impl LibraryScanner {
         }
 
         // Pattern 4: Pure numeric name: "0105", "105.5"
-        let re_pure = Regex::new(r#"^\s*([0-9]+(?:\.[0-9]+)?)\s*$"#).ok()?;
-        if let Some(caps) = re_pure.captures(&file_stem) {
+        if let Some(caps) = RE_PURE.captures(&file_stem) {
             if let Some(m) = caps.get(1) {
                 if let Ok(num) = m.as_str().parse::<f64>() {
                     return Some(num);
@@ -277,9 +264,8 @@ impl LibraryScanner {
         }
 
         // Pattern 5: Last standalone number
-        let re_any = Regex::new(r#"\b([0-9]+(?:\.[0-9]+)?)\b"#).ok()?;
         let mut last_num = None;
-        for cap in re_any.captures_iter(&file_stem) {
+        for cap in RE_ANY.captures_iter(&file_stem) {
             if let Some(m) = cap.get(1) {
                 if let Ok(num) = m.as_str().parse::<f64>() {
                     last_num = Some(num);

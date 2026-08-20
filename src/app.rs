@@ -46,6 +46,7 @@ pub struct App {
     pub active_pane: ActivePane,
     pub download_jobs: Vec<DownloadJob>,
     pub tick_count: usize,
+    pub is_scanning: bool,
 
     pub toast: Option<(String, bool, Instant)>,
     pub show_help_modal: bool,
@@ -77,43 +78,64 @@ impl App {
             active_pane: ActivePane::SeriesList,
             download_jobs: Vec::new(),
             tick_count: 0,
+            is_scanning: false,
             toast: None,
             show_help_modal: false,
             event_tx,
             should_quit: false,
         };
 
-        // 1. Blazing fast startup: load existing SQLite database immediately (< 2ms)
+        // 1. Instant startup: load existing SQLite database immediately (< 2ms)
         app.reload_series()?;
         app.reload_chapters()?;
 
-        // 2. Perform fast diff scan if configured (uses cached DB diffing)
+        // 2. Spawn non-blocking background scan if auto_scan_on_startup is true
         if app.config.auto_scan_on_startup && app.config.library_dir.exists() {
-            let _ = app.scan_library_silent();
-            let _ = app.reload_series();
-            let _ = app.reload_chapters();
+            app.spawn_background_scan();
         }
 
         Ok(app)
     }
 
-    pub fn scan_library(&mut self) -> Result<()> {
-        let summary = LibraryScanner::scan_directory(&self.db, &self.config.library_dir)?;
-        self.reload_series()?;
-        self.reload_chapters()?;
-        self.set_toast(
-            format!(
-                "Scanned library: {} series, {} chapters ({} added)",
-                summary.series_found, summary.chapters_found, summary.new_chapters_added
-            ),
-            false,
+    /// Spawns a background thread to scan the library without blocking UI startup or navigation
+    pub fn spawn_background_scan(&mut self) {
+        if self.is_scanning {
+            return;
+        }
+        self.is_scanning = true;
+        let db = self.db.clone();
+        let lib_dir = self.config.library_dir.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::task::spawn_blocking(
+            move || match LibraryScanner::scan_directory(&db, &lib_dir) {
+                Ok(summary) => {
+                    let _ = event_tx.send(AppEvent::ScanCompleted(summary));
+                }
+                Err(err) => {
+                    let _ = event_tx.send(AppEvent::Toast {
+                        message: format!("Scan error: {}", err),
+                        is_error: true,
+                    });
+                }
+            },
         );
-        Ok(())
     }
 
-    fn scan_library_silent(&mut self) -> Result<()> {
-        let _ = LibraryScanner::scan_directory(&self.db, &self.config.library_dir)?;
-        Ok(())
+    pub fn on_scan_completed(&mut self, summary: crate::scanner::ScanSummary) {
+        self.is_scanning = false;
+        let _ = self.reload_series();
+        let _ = self.reload_chapters();
+
+        if summary.new_chapters_added > 0 {
+            self.set_toast(
+                format!(
+                    "Scanned library: {} series, {} chapters ({} added)",
+                    summary.series_found, summary.chapters_found, summary.new_chapters_added
+                ),
+                false,
+            );
+        }
     }
 
     pub fn reload_series(&mut self) -> Result<()> {

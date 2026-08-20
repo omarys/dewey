@@ -207,9 +207,8 @@ async fn main() -> Result<()> {
                             app.download_next_unread_chapter();
                         }
                         (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                            if let Err(err) = app.scan_library() {
-                                app.set_toast(format!("Scan failed: {}", err), true);
-                            }
+                            app.set_toast("Scanning library in background...", false);
+                            app.spawn_background_scan();
                         }
                         (KeyCode::Char('m'), KeyModifiers::NONE) => {
                             if let Err(err) = app.toggle_completed_selected() {
@@ -223,6 +222,10 @@ async fn main() -> Result<()> {
                         }
                         _ => {}
                     }
+                }
+
+                AppEvent::ScanCompleted(summary) => {
+                    app.on_scan_completed(summary);
                 }
 
                 AppEvent::DownloadStarted {

@@ -30,7 +30,7 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let lib_path_display = app.config.library_dir.to_string_lossy();
 
-    let header_text = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(
             " 📚 DEWEY ",
             Style::default()
@@ -59,9 +59,18 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             format!("  [📁 {}]", lib_path_display),
             Style::default().fg(theme.muted_fg),
         ),
-    ]);
+    ];
 
-    let p = Paragraph::new(header_text).style(Style::default().bg(Color::Reset));
+    if app.is_scanning {
+        header_spans.push(Span::styled(
+            format!("  {} Scanning library...", get_spinner(app.tick_count)),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let p = Paragraph::new(Line::from(header_spans)).style(Style::default().bg(Color::Reset));
     f.render_widget(p, area);
 }
 

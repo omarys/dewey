@@ -7,6 +7,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::Interval;
 
+use crate::scanner::ScanSummary;
+
 #[derive(Debug, Clone)]
 pub struct DownloadSuccessPayload {
     pub task_id: u64,
@@ -28,6 +30,8 @@ pub enum AppEvent {
     Resize(u16, u16),
     /// Periodic tick for animations (spinners, timers)
     Tick,
+    /// Background library scan finished
+    ScanCompleted(ScanSummary),
     /// Background Labrador download has started
     DownloadStarted {
         task_id: u64,

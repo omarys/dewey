@@ -42,6 +42,15 @@ impl Database {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite database at {:?}", path))?;
 
+        // Configure high-performance SQLite pragmas for instant startup and flash storage
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -64000;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA temp_store = MEMORY;",
+        )?;
+
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -75,17 +84,27 @@ impl Database {
         Ok(())
     }
 
+    /// Single grouped SQL query retrieving all series and their computed statistics in ONE roundtrip
     pub fn get_all_series(&self) -> Result<Vec<SeriesWithStats>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, sort_title, cover_path, status, fetch_url, metadata_json
-             FROM series
-             ORDER BY COALESCE(sort_title, title) ASC",
+            "SELECT
+                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json,
+                COUNT(c.id) AS total_count,
+                SUM(CASE WHEN c.file_path IS NOT NULL AND c.file_path != '' THEN 1 ELSE 0 END) AS downloaded_count,
+                SUM(CASE WHEN p.is_completed = 1 THEN 1 ELSE 0 END) AS completed_count,
+                MAX(CASE WHEN p.last_read_at IS NOT NULL THEN c.chapter_number ELSE NULL END) AS latest_read_chap,
+                MAX(p.last_read_at) AS latest_read_time
+             FROM series s
+             LEFT JOIN chapters c ON s.id = c.series_id
+             LEFT JOIN progress p ON c.id = p.chapter_id
+             GROUP BY s.id
+             ORDER BY COALESCE(s.sort_title, s.title) ASC",
         )?;
 
         let series_list = stmt
             .query_map([], |row| {
-                Ok(Series {
+                let series = Series {
                     id: row.get(0)?,
                     title: row.get(1)?,
                     sort_title: row.get(2)?,
@@ -93,55 +112,33 @@ impl Database {
                     status: row.get(4)?,
                     fetch_url: row.get(5)?,
                     metadata_json: row.get(6)?,
-                })
+                };
+
+                let total_count: i64 = row.get(7).unwrap_or(0);
+                let downloaded_count: i64 = row.get(8).unwrap_or(0);
+                let completed_count: i64 = row.get(9).unwrap_or(0);
+                let latest_read_chap: Option<f64> = row.get(10)?;
+                let latest_read_time_str: Option<String> = row.get(11)?;
+
+                let last_read_at = latest_read_time_str.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .ok()
+                });
+
+                let stats = SeriesStats {
+                    total_chapters: total_count as usize,
+                    downloaded_chapters: downloaded_count as usize,
+                    completed_chapters: completed_count as usize,
+                    latest_read_chapter: latest_read_chap,
+                    last_read_at,
+                };
+
+                Ok(SeriesWithStats { series, stats })
             })?
-            .collect::<Result<Vec<Series>, _>>()?;
+            .collect::<Result<Vec<SeriesWithStats>, _>>()?;
 
-        let mut result = Vec::with_capacity(series_list.len());
-        for series in series_list {
-            let stats = self.get_series_stats_inner(&conn, series.id)?;
-            result.push(SeriesWithStats { series, stats });
-        }
-
-        Ok(result)
-    }
-
-    fn get_series_stats_inner(&self, conn: &Connection, series_id: i64) -> Result<SeriesStats> {
-        let mut stmt = conn.prepare(
-            "SELECT
-                COUNT(c.id) AS total_count,
-                SUM(CASE WHEN c.file_path IS NOT NULL AND c.file_path != '' THEN 1 ELSE 0 END) AS downloaded_count,
-                SUM(CASE WHEN p.is_completed = 1 THEN 1 ELSE 0 END) AS completed_count,
-                MAX(CASE WHEN p.last_read_at IS NOT NULL THEN c.chapter_number ELSE NULL END) AS latest_read_chap,
-                MAX(p.last_read_at) AS latest_read_time
-             FROM chapters c
-             LEFT JOIN progress p ON c.id = p.chapter_id
-             WHERE c.series_id = ?1",
-        )?;
-
-        let stats = stmt.query_row(params![series_id], |row| {
-            let total_count: i64 = row.get(0).unwrap_or(0);
-            let downloaded_count: i64 = row.get(1).unwrap_or(0);
-            let completed_count: i64 = row.get(2).unwrap_or(0);
-            let latest_read_chap: Option<f64> = row.get(3)?;
-            let latest_read_time_str: Option<String> = row.get(4)?;
-
-            let last_read_at = latest_read_time_str.and_then(|s| {
-                DateTime::parse_from_rfc3339(&s)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .ok()
-            });
-
-            Ok(SeriesStats {
-                total_chapters: total_count as usize,
-                downloaded_chapters: downloaded_count as usize,
-                completed_chapters: completed_count as usize,
-                latest_read_chapter: latest_read_chap,
-                last_read_at,
-            })
-        })?;
-
-        Ok(stats)
+        Ok(series_list)
     }
 
     pub fn get_chapters_for_series(&self, series_id: i64) -> Result<Vec<ChapterWithProgress>> {
