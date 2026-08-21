@@ -5,8 +5,12 @@ use regex::Regex;
 use serde_json::Value;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    LazyLock,
+};
 use tracing::info;
+use tracing::warn;
 
 use crate::db::{ChapterScanEntry, Database};
 
@@ -35,7 +39,9 @@ pub struct LibraryScanner;
 
 impl LibraryScanner {
     /// Scans the designated library directory and synchronizes it with SQLite.
-    /// Uses cached database diffing and precompiled regexes for maximum performance.
+    /// Series are processed in parallel across a bounded worker pool so ZIP
+    /// page-count reads (the slow part) overlap; SQLite writes stay serialized
+    /// behind the shared connection mutex.
     pub fn scan_directory(db: &Database, library_dir: &Path) -> Result<ScanSummary> {
         if !library_dir.exists() {
             fs::create_dir_all(library_dir)?;
@@ -45,52 +51,63 @@ impl LibraryScanner {
 
         info!(path = ?library_dir, "Scanning library directory for manga entries");
 
-        let mut summary = ScanSummary::default();
-        let entries = fs::read_dir(library_dir)?;
+        // Collect series directories before fanning out work.
+        let series_dirs: Vec<PathBuf> = fs::read_dir(library_dir)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && !Self::is_special_dir(p))
+            .collect();
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && !Self::is_special_dir(&path) {
-                summary.series_found += 1;
-
-                // 1. Read series.json if present for richer metadata
-                let series_meta = Self::read_series_json(&path);
-
-                let folder_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().replace('_', " "))
-                    .unwrap_or_else(|| "Unknown Series".to_string());
-
-                let series_title = series_meta
-                    .as_ref()
-                    .and_then(|m| m.name.clone())
-                    .unwrap_or(folder_name);
-
-                let cover_path = Self::find_cover_image(&path);
-                let series_id = db.insert_or_get_series_with_cover(
-                    &series_title,
-                    cover_path.as_deref().and_then(|p| p.to_str()),
-                )?;
-
-                // Update series metadata / status / fetch_url if found in series.json
-                if let Some(meta) = &series_meta {
-                    if let Some(status) = &meta.status {
-                        let _ = db.update_series_status(series_id, status);
-                    }
-                    if let Some(json_raw) = &meta.raw_json {
-                        let _ = db.update_series_metadata(series_id, json_raw);
-                    }
-                    if let Some(url) = &meta.fetch_url {
-                        let _ = db.update_series_fetch_url(series_id, url);
-                    }
-                }
-
-                // 2. Scan chapter files inside the series directory using fast diff
-                let (ch_count, new_count) = Self::scan_series_directory(db, series_id, &path)?;
-                summary.chapters_found += ch_count;
-                summary.new_chapters_added += new_count;
-            }
+        if series_dirs.is_empty() {
+            return Ok(ScanSummary::default());
         }
+
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(series_dirs.len());
+        let next = AtomicUsize::new(0);
+
+        // Each worker claims the next unprocessed series by index and reports a
+        // local summary; the parent merges them all.
+        let summary = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut local = ScanSummary::default();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            if i >= series_dirs.len() {
+                                break;
+                            }
+                            match Self::scan_one_series(db, &series_dirs[i]) {
+                                Ok(one) => {
+                                    local.series_found += one.series_found;
+                                    local.chapters_found += one.chapters_found;
+                                    local.new_chapters_added += one.new_chapters_added;
+                                }
+                                Err(err) => warn!(
+                                    series = ?series_dirs[i],
+                                    error = %err,
+                                    "Failed to scan series; continuing"
+                                ),
+                            }
+                        }
+                        local
+                    })
+                })
+                .collect();
+
+            let mut total = ScanSummary::default();
+            for h in handles {
+                if let Ok(part) = h.join() {
+                    total.series_found += part.series_found;
+                    total.chapters_found += part.chapters_found;
+                    total.new_chapters_added += part.new_chapters_added;
+                }
+            }
+            total
+        });
 
         info!(
             series = summary.series_found,
@@ -98,6 +115,51 @@ impl LibraryScanner {
             new = summary.new_chapters_added,
             "Library directory scan completed"
         );
+
+        Ok(summary)
+    }
+
+    /// Scans a single series directory and returns its contribution to the summary.
+    fn scan_one_series(db: &Database, path: &Path) -> Result<ScanSummary> {
+        let mut summary = ScanSummary::default();
+        summary.series_found += 1;
+
+        // 1. Read series.json if present for richer metadata
+        let series_meta = Self::read_series_json(path);
+
+        let folder_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().replace('_', " "))
+            .unwrap_or_else(|| "Unknown Series".to_string());
+
+        let series_title = series_meta
+            .as_ref()
+            .and_then(|m| m.name.clone())
+            .unwrap_or(folder_name);
+
+        let cover_path = Self::find_cover_image(path);
+        let series_id = db.insert_or_get_series_with_cover(
+            &series_title,
+            cover_path.as_deref().and_then(|p| p.to_str()),
+        )?;
+
+        // Update series metadata / status / fetch_url if found in series.json
+        if let Some(meta) = &series_meta {
+            if let Some(status) = &meta.status {
+                let _ = db.update_series_status(series_id, status);
+            }
+            if let Some(json_raw) = &meta.raw_json {
+                let _ = db.update_series_metadata(series_id, json_raw);
+            }
+            if let Some(url) = &meta.fetch_url {
+                let _ = db.update_series_fetch_url(series_id, url);
+            }
+        }
+
+        // 2. Scan chapter files inside the series directory using fast diff
+        let (ch_count, new_count) = Self::scan_series_directory(db, series_id, path)?;
+        summary.chapters_found += ch_count;
+        summary.new_chapters_added += new_count;
 
         Ok(summary)
     }
@@ -148,6 +210,26 @@ impl LibraryScanner {
         } else {
             false
         }
+    }
+
+    /// True if `dir` (recursively) contains any chapter archive
+    /// (.cbz/.zip/.epub/.pdf/.cbr). Used to refuse initializing an empty
+    /// library with no comic content.
+    pub fn has_chapter_files(dir: &Path) -> bool {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            if let Ok(entries) = fs::read_dir(&d) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if Self::is_chapter_file(&p) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn is_special_dir(path: &Path) -> bool {
@@ -332,6 +414,8 @@ struct SeriesMetadataParsed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
+    use std::io::Write;
 
     #[test]
     fn test_parse_bracketed_chapter_names() {
@@ -351,5 +435,69 @@ mod tests {
             LibraryScanner::parse_chapter_number(Path::new("Solo Leveling - c105.cbz")),
             Some(105.0)
         );
+    }
+
+    #[test]
+    fn test_has_chapter_files_detects_archives() {
+        let root = std::env::temp_dir().join(format!("dewey_empty_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Series")).unwrap();
+
+        // Empty library (even with subfolders) -> false
+        assert!(!LibraryScanner::has_chapter_files(&root));
+
+        // One cbz in root -> true
+        std::fs::write(root.join("c001.cbz"), b"x").unwrap();
+        assert!(LibraryScanner::has_chapter_files(&root));
+
+        // Only archives in a nested subfolder -> true
+        std::fs::remove_file(root.join("c001.cbz")).unwrap();
+        std::fs::create_dir_all(root.join("Series").join("deep")).unwrap();
+        std::fs::write(root.join("Series").join("deep").join("c002.zip"), b"x").unwrap();
+        assert!(LibraryScanner::has_chapter_files(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Exercises the parallel scan path: builds a temp library with several
+    /// series of cbz files and verifies the DB is hydrated correctly.
+    #[test]
+    fn test_parallel_scan_hydrates_library() {
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let root = std::env::temp_dir().join(format!("dewey_scan_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 4 series x 3 chapters, each cbz with 5 image entries.
+        for s in 0..4 {
+            let dir = root.join(format!("Series_{}", s));
+            std::fs::create_dir_all(&dir).unwrap();
+            for c in 0..3 {
+                let zp = dir.join(format!("c{:03}.cbz", c + 1));
+                let file = std::fs::File::create(&zp).unwrap();
+                let mut z = ZipWriter::new(file);
+                let opts = SimpleFileOptions::default();
+                for p in 0..5 {
+                    z.start_file(format!("{}.jpg", p), opts).unwrap();
+                    z.write_all(b"x").unwrap();
+                }
+                z.finish().unwrap();
+            }
+        }
+
+        let db = Database::in_memory().unwrap();
+        let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
+
+        assert_eq!(summary.series_found, 4);
+        assert_eq!(summary.chapters_found, 12);
+        assert_eq!(summary.new_chapters_added, 12);
+
+        let series = db.get_all_series().unwrap();
+        assert_eq!(series.len(), 4);
+        assert_eq!(series[0].stats.total_chapters, 3);
+        assert_eq!(series[0].stats.downloaded_chapters, 3);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

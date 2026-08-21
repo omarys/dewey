@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{ActivePane, App};
+use crate::app::{ActivePane, App, AppAction};
 use crate::ui::theme::Theme;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -447,6 +447,50 @@ pub fn render_downloads_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme)
     f.render_widget(paragraph, area);
 }
 
+/// Footer tap targets: one tappable button per action; records their screen
+/// rects so taps can be hit-tested. Mirrors the keyboard shortcuts.
+const ACTION_LABELS: [(&str, AppAction); 7] = [
+    ("Open", AppAction::Open),
+    ("Fetch", AppAction::Fetch),
+    ("Next", AppAction::FetchNext),
+    ("Scan", AppAction::Scan),
+    ("Reset", AppAction::Reset),
+    ("Delete", AppAction::Delete),
+    ("Quit", AppAction::Quit),
+];
+
+pub fn render_action_bar(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    app.action_rects.clear();
+    let n = ACTION_LABELS.len() as u16;
+    let cells = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![Constraint::Percentage(100 / n); n as usize])
+        .split(area);
+
+    for (cell, (label, action)) in cells.iter().zip(ACTION_LABELS.iter()) {
+        app.action_rects.push((*cell, *action));
+        let text = format!("{} {}", label, action_key(*action));
+        let span = Span::styled(text, Style::default().fg(theme.accent));
+        let p = Paragraph::new(Line::from(vec![span]))
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(theme.bg));
+        f.render_widget(p, *cell);
+    }
+}
+
+/// The keyboard shortcut behind each action (for the touch users' memory).
+fn action_key(action: AppAction) -> &'static str {
+    match action {
+        AppAction::Open => "↵",
+        AppAction::Fetch => "d",
+        AppAction::FetchNext => "D",
+        AppAction::Scan => "s",
+        AppAction::Reset => "u",
+        AppAction::Delete => "x",
+        AppAction::Quit => "q",
+    }
+}
+
 pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut spans = vec![
         Span::styled(
@@ -549,6 +593,13 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled(
+                "  g / G                 ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Jump to list top / bottom"),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "  h / l or Tab / S-Tab  ",
                 Style::default().fg(theme.warning),
             ),
@@ -588,6 +639,20 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Toggle chapter completed / uncompleted"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  u                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Mark chapter unread (clear progress)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  x                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Delete selected series (press twice to confirm)"),
         ]),
         Line::from(vec![
             Span::styled(

@@ -4,6 +4,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tracing::{error, info, warn};
 
+/// One chapter's progress as reported by the reader, page numbers LOCAL to
+/// that chapter's own archive (never a global page offset).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChapterProgressPayload {
+    pub file: PathBuf,
+    pub last_page: i64,
+    pub completed: bool,
+}
+
 /// The JSON payload emitted by Continuum on stdout upon closing
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContinuumExitPayload {
@@ -11,6 +20,10 @@ pub struct ContinuumExitPayload {
     pub completed: bool,
     #[serde(default)]
     pub message: Option<String>,
+    /// Every chapter the user actually read this session, in reading order;
+    /// absent/None keeps the legacy single-chapter contract working.
+    #[serde(default)]
+    pub chapters: Option<Vec<ChapterProgressPayload>>,
 }
 
 impl ContinuumExitPayload {
@@ -113,6 +126,7 @@ impl ContinuumRunner {
                 last_page: fallback_page,
                 completed: false,
                 message: None,
+                chapters: None,
             });
         }
 
@@ -161,6 +175,39 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_payload_with_chapters() {
+        let json = r#"{"last_page": 15, "completed": true, "chapters": [{"file": "/manga/a.cbz", "last_page": 15, "completed": true}, {"file": "/manga/b.cbz", "last_page": 4, "completed": false}]}"#;
+        let payload = ContinuumRunner::parse_payload(json, 0).unwrap();
+        assert_eq!(
+            payload.chapters,
+            Some(vec![
+                ChapterProgressPayload {
+                    file: PathBuf::from("/manga/a.cbz"),
+                    last_page: 15,
+                    completed: true,
+                },
+                ChapterProgressPayload {
+                    file: PathBuf::from("/manga/b.cbz"),
+                    last_page: 4,
+                    completed: false,
+                },
+            ])
+        );
+        // Legacy fields still present.
+        assert_eq!(payload.last_page, 15);
+        assert!(payload.completed);
+    }
+
+    #[test]
+    fn test_parse_payload_without_chapters() {
+        let json = r#"{"last_page": 3, "completed": false}"#;
+        let payload = ContinuumRunner::parse_payload(json, 0).unwrap();
+        assert_eq!(payload.chapters, None);
+        assert_eq!(payload.last_page, 3);
+        assert!(!payload.completed);
+    }
+
+    #[test]
     fn test_parse_payload_direct() {
         let json = r#"{"last_page": 45, "completed": false}"#;
         let payload = ContinuumRunner::parse_payload(json, 0).unwrap();
@@ -170,6 +217,7 @@ mod tests {
                 last_page: 45,
                 completed: false,
                 message: None,
+                chapters: None,
             }
         );
         assert_eq!(
@@ -198,6 +246,7 @@ mod tests {
                 last_page: 12,
                 completed: true,
                 message: None,
+                chapters: None,
             }
         );
         assert_eq!(

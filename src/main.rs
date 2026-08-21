@@ -15,7 +15,7 @@ use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use app::App;
+use app::{ActivePane, App, AppAction};
 use config::Config;
 use db::Database;
 use event::{AppEvent, EventHandler};
@@ -53,6 +53,10 @@ struct Cli {
     /// Seed sample data if library and database are empty
     #[arg(long)]
     seed: Option<bool>,
+
+    /// Reinitialize the SQLite database from scratch (deletes all data)
+    #[arg(long)]
+    init: bool,
 }
 
 fn init_logging(log_path: &Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -83,8 +87,22 @@ async fn main() -> Result<()> {
     // 1. Load config file and apply CLI overrides
     let mut config = Config::load_or_create(cli.config.as_deref())?;
 
-    if let Some(dir) = cli.library_dir {
-        config.library_dir = dir;
+    // A directory positional argument (e.g. `dewey .`) is a library directory,
+    // not a direct-launch file. It takes effect unless -l/--library-dir is given.
+    let positional_dir = cli.file.as_deref().filter(|p| p.is_dir());
+    let explicit_library = cli
+        .library_dir
+        .clone()
+        .or_else(|| positional_dir.map(Path::to_path_buf));
+
+    // Per-directory DB: when a library dir is explicitly set (-l or `.`), keep
+    // the database alongside that dir (one DB per library) unless --db-path is
+    // given explicitly.
+    if let Some(dir) = &explicit_library {
+        config.library_dir = dir.clone();
+        if cli.db_path.is_none() {
+            config.db_path = dir.join(".dewey.db");
+        }
     }
     if let Some(db) = cli.db_path {
         config.db_path = db;
@@ -105,14 +123,37 @@ async fn main() -> Result<()> {
         "Connecting to SQLite database"
     );
 
+    // Start over: wipe the database (and WAL/SHM) so the next open recreates it fresh.
+    if cli.init {
+        Database::reset(&config.db_path)?;
+        println!(
+            "Database reset at {:?}. A fresh database will be created on next launch.",
+            config.db_path
+        );
+        return Ok(());
+    }
+
+    // Refuse to initialize a brand-new library that contains no comic
+    // archives anywhere — there is nothing to track yet.
+    if let (Some(dir), false) = (&explicit_library, config.db_path.exists()) {
+        if !crate::scanner::LibraryScanner::has_chapter_files(dir) {
+            println!(
+                "No .cbz files found in {:?} — skipping library initialization.",
+                dir
+            );
+            return Ok(());
+        }
+    }
+
     let db = Database::open(&config.db_path)?;
     if config.seed_sample_data {
         db.seed_sample_data_if_empty()?;
     }
 
-    // Direct file launch mode (e.g. `dewey path/to/chapter.cbz`)
-    if let Some(target_file) = cli.file {
-        let abs_path = std::fs::canonicalize(&target_file).unwrap_or(target_file);
+    // Direct file launch mode (e.g. `dewey path/to/chapter.cbz`).
+    // A directory argument is a library directory, not a file to launch.
+    if let Some(target_file) = cli.file.as_ref().filter(|p| !p.is_dir()) {
+        let abs_path = std::fs::canonicalize(target_file).unwrap_or(target_file.clone());
         let chapter_id = db.get_or_create_chapter_for_file(&abs_path)?;
 
         let (last_page, chapter_num) = {
@@ -135,8 +176,32 @@ async fn main() -> Result<()> {
         let runner = ContinuumRunner::new(&config.continuum_bin);
         let result = runner.spawn_and_wait(&abs_path, last_page)?;
 
-        db.upsert_progress(chapter_id, result.last_page, result.completed)?;
-        println!("{}", result.completion_message(chapter_num));
+        // Persist progress for every chapter the reader actually touched;
+        // fall back to the legacy single-chapter contract when absent.
+        let updated = match result.chapters.as_ref().filter(|c| !c.is_empty()) {
+            Some(chapters) => {
+                let mut n = 0usize;
+                for entry in chapters {
+                    db.apply_chapter_progress(
+                        Path::new(&entry.file),
+                        entry.last_page,
+                        entry.completed,
+                    )?;
+                    n += 1;
+                }
+                n
+            }
+            None => {
+                db.upsert_progress(chapter_id, result.last_page, result.completed)?;
+                1
+            }
+        };
+
+        let mut msg = result.completion_message(chapter_num);
+        if updated > 1 {
+            msg = format!("{} · {} chapters updated", msg, updated);
+        }
+        println!("{}", msg);
         return Ok(());
     }
 
@@ -185,6 +250,12 @@ async fn main() -> Result<()> {
                         (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                             app.prev_item();
                         }
+                        (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                            app.jump_list_top();
+                        }
+                        (KeyCode::Char('G'), _) => {
+                            app.jump_list_bottom();
+                        }
                         (KeyCode::Tab, _)
                         | (KeyCode::Right, _)
                         | (KeyCode::Char('l'), KeyModifiers::NONE) => {
@@ -214,6 +285,15 @@ async fn main() -> Result<()> {
                             if let Err(err) = app.toggle_completed_selected() {
                                 app.set_toast(format!("Failed to toggle status: {}", err), true);
                             }
+                        }
+                        (KeyCode::Char('u'), KeyModifiers::NONE) => {
+                            app.clear_progress_selected();
+                        }
+                        (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                            app.request_delete_selected();
+                        }
+                        (KeyCode::Esc, _) => {
+                            app.pending_delete_id = None;
                         }
                         (KeyCode::Char('r'), KeyModifiers::NONE) => {
                             let _ = app.reload_series();
@@ -255,6 +335,106 @@ async fn main() -> Result<()> {
 
                 AppEvent::Toast { message, is_error } => {
                     app.set_toast(message, is_error);
+                }
+
+                // Touchscreen / mouse input: tap selects, double-tap opens,
+                // wheel scrolls the pane under the cursor.
+                AppEvent::Mouse(mouse) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    let x = mouse.column;
+                    let y = mouse.row;
+
+                    let hit_series = app.series_rect.is_some_and(|r| {
+                        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+                    });
+                    let hit_chapters = app.chapters_rect.is_some_and(|r| {
+                        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+                    });
+
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            // Action-bar buttons take precedence over list taps.
+                            if let Some((_, action)) = app.action_rects.iter().find(|(r, _)| {
+                                x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+                            }) {
+                                match action {
+                                    AppAction::Open => {
+                                        if let Err(err) = app.handle_enter_action(&mut tui) {
+                                            app.set_toast(format!("Action failed: {}", err), true);
+                                        }
+                                    }
+                                    AppAction::Fetch => {
+                                        app.download_selected_chapter();
+                                    }
+                                    AppAction::FetchNext => {
+                                        app.download_next_unread_chapter();
+                                    }
+                                    AppAction::Scan => {
+                                        app.set_toast("Scanning library in background...", false);
+                                        app.spawn_background_scan();
+                                    }
+                                    AppAction::Reset => {
+                                        app.clear_progress_selected();
+                                    }
+                                    AppAction::Delete => {
+                                        app.request_delete_selected();
+                                    }
+                                    AppAction::Quit => {
+                                        app.should_quit = true;
+                                    }
+                                }
+                            } else if hit_series {
+                                if let Some(rect) = app.series_rect {
+                                    let idx = y.saturating_sub(rect.y) as usize;
+                                    if idx < app.series_list.len() {
+                                        app.select_series_index(idx);
+                                        if app.handle_tap(ActivePane::SeriesList, idx) {
+                                            if let Err(err) = app.handle_enter_action(&mut tui) {
+                                                app.set_toast(
+                                                    format!("Action failed: {}", err),
+                                                    true,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if hit_chapters {
+                                if let Some(rect) = app.chapters_rect {
+                                    let idx = y.saturating_sub(rect.y) as usize;
+                                    if idx < app.chapters_list.len() {
+                                        app.select_chapter_index(idx);
+                                        if app.handle_tap(ActivePane::ChaptersList, idx) {
+                                            if let Err(err) = app.handle_enter_action(&mut tui) {
+                                                app.set_toast(
+                                                    format!("Action failed: {}", err),
+                                                    true,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if hit_series && !app.series_list.is_empty() {
+                                let n = app.series_list.len();
+                                app.select_series_index((app.selected_series_idx + 1) % n);
+                            } else if hit_chapters && !app.chapters_list.is_empty() {
+                                let n = app.chapters_list.len();
+                                app.select_chapter_index((app.selected_chapter_idx + 1) % n);
+                            }
+                        }
+                        MouseEventKind::ScrollUp => {
+                            if hit_series && !app.series_list.is_empty() {
+                                let n = app.series_list.len();
+                                app.select_series_index((app.selected_series_idx + n - 1) % n);
+                            } else if hit_chapters && !app.chapters_list.is_empty() {
+                                let n = app.chapters_list.len();
+                                app.select_chapter_index((app.selected_chapter_idx + n - 1) % n);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
 
                 AppEvent::Quit => {
