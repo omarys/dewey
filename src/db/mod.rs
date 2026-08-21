@@ -81,6 +81,17 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path)",
             [],
         );
+
+        // Repair corrupted progress: clamp last_page_read to the chapter's
+        // page count where one is known (e.g. a reader once reported a global
+        // page number far beyond a single chapter). Idempotent.
+        let _ = conn.execute_batch(
+            "UPDATE progress SET last_page_read = c.page_count
+             FROM chapters c
+             WHERE c.id = progress.chapter_id
+               AND c.page_count IS NOT NULL AND c.page_count > 0
+               AND progress.last_page_read > c.page_count;",
+        );
         Ok(())
     }
 
@@ -193,6 +204,21 @@ impl Database {
 
     pub fn upsert_progress(&self, chapter_id: i64, last_page: i64, completed: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+
+        // Enforce bounds: progress beyond a known page count is data
+        // corruption (e.g. a reader report spanning several chapters).
+        let page_count: Option<i64> = conn
+            .query_row(
+                "SELECT page_count FROM chapters WHERE id = ?1",
+                params![chapter_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let bounded = match page_count {
+            Some(n) if n > 0 => last_page.clamp(0, n),
+            _ => last_page.max(0),
+        };
+
         let now_str = Utc::now().to_rfc3339();
 
         conn.execute(
@@ -202,14 +228,44 @@ impl Database {
                 last_page_read = ?2,
                 is_completed = ?3,
                 last_read_at = ?4",
-            params![
-                chapter_id,
-                last_page,
-                if completed { 1 } else { 0 },
-                now_str
-            ],
+            params![chapter_id, bounded, if completed { 1 } else { 0 }, now_str],
         )?;
 
+        Ok(())
+    }
+
+    /// Removes any progress row for the chapter, making it read as unread
+    /// (page 0, not completed).
+    pub fn delete_progress(&self, chapter_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM progress WHERE chapter_id = ?1",
+            params![chapter_id],
+        )?;
+        Ok(())
+    }
+
+    /// Removes a series and, via FK ON DELETE CASCADE, all of its chapters
+    /// and progress records.
+    pub fn delete_series(&self, series_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM series WHERE id = ?1", params![series_id])?;
+        Ok(())
+    }
+
+    /// Wipes the on-disk SQLite database so the next open starts fresh.
+    /// Also removes the WAL and SHM sidecar files SQLite creates alongside it.
+    pub fn reset(path: &Path) -> Result<()> {
+        let path_str = path.to_string_lossy().to_string();
+        for file in [
+            path_str.clone(),
+            format!("{}-wal", path_str),
+            format!("{}-shm", path_str),
+        ] {
+            if Path::new(&file).exists() {
+                std::fs::remove_file(&file)?;
+            }
+        }
         Ok(())
     }
 
@@ -638,6 +694,122 @@ mod tests {
         let (_, prog2) = db.get_progress_for_file(test_file).unwrap().unwrap();
         assert_eq!(prog2.last_page_read, 35);
         assert!(!prog2.is_completed);
+    }
+
+    #[test]
+    fn test_progress_bounds_are_enforced() {
+        let db = Database::in_memory().unwrap();
+        let series_id = db.insert_or_get_series("Bounds Test").unwrap();
+        db.record_chapter_download(series_id, 1.0, "/manga/c01.cbz", Some(15), None)
+            .unwrap();
+        let chapter_id = db
+            .get_chapters_for_series(series_id)
+            .unwrap()
+            .remove(0)
+            .chapter
+            .id;
+
+        // Absurd payload (global page across chapters) -> clamped to page count
+        db.upsert_progress(chapter_id, 1446, false).unwrap();
+        let (_, prog) = db
+            .get_progress_for_file(Path::new("/manga/c01.cbz"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prog.last_page_read, 15);
+
+        // Negative -> clamped to 0
+        db.upsert_progress(chapter_id, -5, false).unwrap();
+        let (_, prog) = db
+            .get_progress_for_file(Path::new("/manga/c01.cbz"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prog.last_page_read, 0);
+
+        // In-range value passes through untouched
+        db.upsert_progress(chapter_id, 7, false).unwrap();
+        let (_, prog) = db
+            .get_progress_for_file(Path::new("/manga/c01.cbz"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prog.last_page_read, 7);
+
+        // Mark unread: progress row deleted -> reads as page 0, uncompleted
+        db.delete_progress(chapter_id).unwrap();
+        let (_, prog) = db
+            .get_progress_for_file(Path::new("/manga/c01.cbz"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prog.last_page_read, 0);
+        assert!(!prog.is_completed);
+    }
+
+    #[test]
+    fn test_init_schema_repairs_out_of_bounds_progress() {
+        let db = Database::in_memory().unwrap();
+        let series_id = db.insert_or_get_series("Repair Test").unwrap();
+        db.record_chapter_download(series_id, 1.0, "/manga/r01.cbz", Some(15), None)
+            .unwrap();
+        let chapter_id = db
+            .get_chapters_for_series(series_id)
+            .unwrap()
+            .remove(0)
+            .chapter
+            .id;
+
+        // Simulate the corrupted row the old global-page payload produced.
+        db.upsert_progress(chapter_id, 0, false).unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE progress SET last_page_read = 1446 WHERE chapter_id = ?1",
+            params![chapter_id],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Re-running schema init (as on next launch) clamps it.
+        db.init_schema().unwrap();
+        let (_, prog) = db
+            .get_progress_for_file(Path::new("/manga/r01.cbz"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prog.last_page_read, 15);
+    }
+
+    #[test]
+    fn test_delete_series_cascades() {
+        let db = Database::in_memory().unwrap();
+        db.seed_sample_data_if_empty().unwrap();
+
+        let series = db.get_all_series().unwrap();
+        let solo = series
+            .iter()
+            .find(|s| s.series.title == "Solo Leveling")
+            .unwrap();
+
+        db.delete_series(solo.series.id).unwrap();
+
+        let after = db.get_all_series().unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(db
+            .get_chapters_for_series(solo.series.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_reset_removes_db_and_sidecar_files() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("dewey_reset_test_{}.db", std::process::id()));
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, b"fake").unwrap();
+        std::fs::write(format!("{}-wal", path_str), b"wal").unwrap();
+        std::fs::write(format!("{}-shm", path_str), b"shm").unwrap();
+
+        Database::reset(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!Path::new(&format!("{}-wal", path_str)).exists());
+        assert!(!Path::new(&format!("{}-shm", path_str)).exists());
     }
 
     #[test]

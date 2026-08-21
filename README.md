@@ -78,9 +78,31 @@ Dewey acts as the central orchestration "brain" between your local library, read
 | <kbd>D</kbd> | **Download Next** | Fetch the next un-downloaded chapter in current series |
 | <kbd>s</kbd> | **Scan Library** | Re-scan the designated library folder for new files |
 | <kbd>m</kbd> | **Toggle Read** | Toggle chapter completed / uncompleted status |
+| <kbd>u</kbd> | **Mark Unread** | Clear a chapter's progress (page 0, not completed) |
+| <kbd>x</kbd> | **Delete Series** | Remove selected series (press twice to confirm) |
 | <kbd>r</kbd> | **Reload** | Reload library entries and database stats |
 | <kbd>?</kbd> | **Help** | Toggle the keyboard navigation help modal |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | **Quit** | Exit Dewey cleanly |
+
+### Touchscreen (tablets)
+
+In a terminal that translates touch to mouse events (e.g. **foot** on
+Wayland):
+
+- **Tap** an item to select it (and focus that pane)
+- **Double-tap** a series to open its chapters, a chapter to read it
+- **Scroll wheel** moves the selection in the pane under the cursor
+- A bottom **action bar** (Open / Fetch / Next / Scan / Reset / Delete /
+  Quit) gives one-tap access to the main actions without a keyboard
+- In **portrait** orientation the panes stack vertically instead of
+  side-by-side, so columns stay wide enough for fingers.
+
+> **Terminal choice**: **foot** translates touchscreen taps into mouse-button
+> events (its `[touch]` section) and is lightweight — the recommended terminal
+> on tablets. **kitty** supports SGR mouse reporting, so a *pointer/wheel*
+> works, but its touchscreen support is scroll-only (no tap→click synthesis),
+> so kitty is not sufficient for finger-based use.
+
 
 ---
 
@@ -109,6 +131,22 @@ auto_scan_on_startup = true
 seed_sample_data = false
 ```
 
+### SQLite Memory Tradeoff
+
+On open, Dewey sets generous SQLite memory sizes:
+
+| Pragma | Default | What it does |
+|:---|:---|:---|
+| `mmap_size` | 256 MB | *Cap* on files SQLite maps into memory. It is lazy — only pages actually read are mapped — so it rarely uses the full amount. |
+| `cache_size` | 64 MB (page cache) | Reserved RAM held for SQLite's page cache. This *is* reserved up front. |
+
+`mmap_size` is just an upper bound and is safe to leave at the default. On a
+low-RAM device the real cost is `cache_size`: 64 MB of page cache is generous
+for a comic library. To trade a little scan/read speed for much lower memory
+pressure, lower it in `Database::open` (src/db/mod.rs) — e.g. `-8000` (~8 MB)
+and `mmap_size=67108864` (64 MB). The defaults favor speed; tune down only if
+you observe memory pressure.
+
 ### CLI Options
 
 ```bash
@@ -121,9 +159,33 @@ dewey --library-dir ~/Documents/Manga
 # Launch with custom config file
 dewey -c /path/to/dewey.toml
 
+# Reset the database and start over (deletes all data)
+dewey --init
+
 # Direct file launch (runs Continuum with progress tracking & saves on close)
 dewey ~/Documents/Books/Chainsaw_Man/[0001]_Chapter_1.cbz
 ```
+
+> **Library location**: the library directory is **not hard-coded**. Set
+> `library_dir` in your config file (`dewey.toml` or
+> `~/.config/dewey/config.toml`), or pass `-l/--library-dir` to override it. A
+> default is only auto-detected (and written to a freshly generated config) when
+> **no** config file exists — it picks the first existing of
+> `~/Documents/Books`, `~/Documents/Manga`, `~/Manga`, `~/Books`.
+>
+> **Multiple libraries (per-directory databases)**: when you point Dewey at a
+> library directory explicitly — `dewey .`, `dewey <dir>`, or `-l <dir>` — it
+> keeps a **separate database per directory** (`<dir>/.dewey.db`, created if
+> missing), so several libraries stay fully isolated. Override with
+> `--db-path` if you want a specific DB. When no directory is given (plain
+> `dewey`), the configured `library_dir` / `db_path` are used instead.
+> A directory positional argument is treated as a library directory; a file
+> (`.cbz`/`.zip`) positional still triggers direct-launch.
+>
+> **Empty-library guard**: initialization is skipped (with a message) when the
+> target directory contains no comic archives (`.cbz`, `.zip`, `.epub`, `.pdf`,
+> `.cbr`) anywhere in its tree and no database exists yet — an existing library
+> that is temporarily empty still opens normally.
 
 ---
 
@@ -153,6 +215,24 @@ cargo clippy -- -D warnings
 # Build optimized binary
 cargo build --release
 ```
+
+### Native Device Build (internal)
+
+For maximum performance on a specific machine — especially a low-resource
+ARM device like the PineTab 2 — build with CPU-native optimizations. The
+compiler then uses every instruction the local CPU supports (NEON/SIMD on
+ARM, AVX on x86):
+
+```bash
+./install.sh        # builds with -C target-cpu=native and installs to ~/.cargo/bin
+# or: DEWEY_PREFIX=/opt/bin ./install.sh
+```
+
+> ⚠️ A native build is **not portable** (it targets the build machine's exact
+> CPU), so it is intended for internal/per-device use.
+>
+> Run `install.sh` on each device you deploy to. If you set `RUSTFLAGS`
+> yourself, note that `install.sh` appends `-C target-cpu=native` to it.
 
 ### Testing
 

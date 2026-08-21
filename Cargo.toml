@@ -12,8 +12,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 
 # Async Runtime & Concurrency
-tokio = { version = "1.43", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
 futures = "0.3"
 
 # Database & Serialization
@@ -34,3 +33,11 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+
+[profile.release]
+# Low-resource / portable build: shrink binary + speed up execution.
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+# Drop debug symbols: smaller binary, faster cold launch
+strip = true

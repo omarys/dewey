@@ -1,4 +1,5 @@
 use anyhow::Result;
+use ratatui::layout::Rect;
 use ratatui::widgets::{ListState, TableState};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,6 +19,19 @@ pub enum ActivePane {
     SeriesList,
     ChaptersList,
     ActiveDownloads,
+}
+
+/// One-shot actions exposed as tappable buttons in the footer action bar
+/// (touchscreen-friendly mirror of the keyboard shortcuts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppAction {
+    Open,
+    Fetch,
+    FetchNext,
+    Scan,
+    Reset,
+    Delete,
+    Quit,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +64,14 @@ pub struct App {
 
     pub toast: Option<(String, bool, Instant)>,
     pub show_help_modal: bool,
+    pub pending_delete_id: Option<i64>,
+    /// Last-frame render areas, used to hit-test taps.
+    pub series_rect: Option<Rect>,
+    pub chapters_rect: Option<Rect>,
+    /// Tappable action-bar buttons rendered by the footer.
+    pub action_rects: Vec<(Rect, AppAction)>,
+    /// (time, pane, index) of the previous left-click, for double-tap open.
+    pub last_tap: Option<(Instant, ActivePane, usize)>,
     pub event_tx: UnboundedSender<AppEvent>,
     pub should_quit: bool,
 }
@@ -81,6 +103,11 @@ impl App {
             is_scanning: false,
             toast: None,
             show_help_modal: false,
+            pending_delete_id: None,
+            series_rect: None,
+            chapters_rect: None,
+            action_rects: Vec::new(),
+            last_tap: None,
             event_tx,
             should_quit: false,
         };
@@ -180,6 +207,42 @@ impl App {
         self.chapters_list.get(self.selected_chapter_idx)
     }
 
+    /// Selects the series at `idx` (tap). Focuses the series pane, reloads the
+    /// chapter list for it, and cancels any pending delete confirmation.
+    pub fn select_series_index(&mut self, idx: usize) {
+        if idx >= self.series_list.len() {
+            return;
+        }
+        self.active_pane = ActivePane::SeriesList;
+        self.selected_series_idx = idx;
+        self.series_state.select(Some(idx));
+        self.selected_chapter_idx = 0;
+        let _ = self.reload_chapters();
+        self.pending_delete_id = None;
+    }
+
+    /// Selects the chapter at `idx` (tap).
+    pub fn select_chapter_index(&mut self, idx: usize) {
+        if idx >= self.chapters_list.len() {
+            return;
+        }
+        self.active_pane = ActivePane::ChaptersList;
+        self.selected_chapter_idx = idx;
+        self.chapters_state.select(Some(idx));
+        self.pending_delete_id = None;
+    }
+
+    /// Registers a tap on (pane, idx); returns true when it is a double-tap on
+    /// the same item (i.e. should trigger the open action).
+    pub fn handle_tap(&mut self, pane: ActivePane, idx: usize) -> bool {
+        let now = Instant::now();
+        let is_double = self.last_tap.is_some_and(|(t, p, i)| {
+            p == pane && i == idx && now.duration_since(t) < Duration::from_millis(400)
+        });
+        self.last_tap = Some((now, pane, idx));
+        is_double
+    }
+
     pub fn set_toast(&mut self, message: impl Into<String>, is_error: bool) {
         self.toast = Some((message.into(), is_error, Instant::now()));
     }
@@ -193,6 +256,7 @@ impl App {
     }
 
     pub fn next_item(&mut self) {
+        self.pending_delete_id = None;
         match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.series_list.is_empty() {
@@ -215,6 +279,7 @@ impl App {
     }
 
     pub fn prev_item(&mut self) {
+        self.pending_delete_id = None;
         match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.series_list.is_empty() {
@@ -243,6 +308,7 @@ impl App {
     }
 
     pub fn switch_pane_forward(&mut self) {
+        self.pending_delete_id = None;
         self.active_pane = match self.active_pane {
             ActivePane::SeriesList => ActivePane::ChaptersList,
             ActivePane::ChaptersList => {
@@ -257,6 +323,7 @@ impl App {
     }
 
     pub fn switch_pane_backward(&mut self) {
+        self.pending_delete_id = None;
         self.active_pane = match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.download_jobs.is_empty() {
@@ -473,6 +540,31 @@ impl App {
         }
     }
 
+    /// Deletes the selected series. Requires a second `x` press on the same
+    /// series to confirm; any navigation clears the pending confirmation.
+    pub fn request_delete_selected(&mut self) {
+        let current_id = self.current_series().map(|s| s.series.id);
+
+        // Second press on the same series -> confirm and delete.
+        if self.pending_delete_id.is_some() && self.pending_delete_id == current_id {
+            self.pending_delete_id = None;
+            match self.db.delete_series(current_id.unwrap()) {
+                Ok(()) => {
+                    let _ = self.reload_series();
+                    let _ = self.reload_chapters();
+                    self.set_toast("Series removed from library", false);
+                }
+                Err(err) => self.set_toast(format!("Failed to delete series: {}", err), true),
+            }
+        } else {
+            self.pending_delete_id = current_id;
+            if current_id.is_some() {
+                self.set_toast("Press x again to delete this series", false);
+            }
+        }
+    }
+
+    /// Toggle chapter completed / uncompleted status for the selected chapter.
     pub fn toggle_completed_selected(&mut self) -> Result<()> {
         if let Some(chap) = self.current_chapter() {
             let chapter_id = chap.chapter.id;
@@ -489,6 +581,25 @@ impl App {
             self.set_toast(msg, false);
         }
         Ok(())
+    }
+
+    /// Clears the selected chapter's reading progress (page 0, uncompleted).
+    pub fn clear_progress_selected(&mut self) {
+        if let Some(chap) = self.current_chapter() {
+            let chapter_id = chap.chapter.id;
+            let chapter_num = chap.chapter.chapter_number;
+            match self.db.delete_progress(chapter_id) {
+                Ok(()) => {
+                    let _ = self.reload_chapters();
+                    let _ = self.reload_series();
+                    self.set_toast(
+                        format!("Chapter {:.1} marked as unread", chapter_num),
+                        false,
+                    );
+                }
+                Err(err) => self.set_toast(format!("Failed to clear progress: {}", err), true),
+            }
+        }
     }
 
     pub fn on_download_started(
@@ -566,5 +677,47 @@ impl App {
             ),
             true,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::db::Database;
+    use tokio::sync::mpsc;
+
+    fn test_app() -> App {
+        let db = Database::in_memory().unwrap();
+        db.seed_sample_data_if_empty().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut cfg = Config::default();
+        cfg.auto_scan_on_startup = false; // no tokio runtime in tests
+        App::new(cfg, db, tx).unwrap()
+    }
+
+    #[test]
+    fn tap_selects_and_double_tap_detects() {
+        let mut app = test_app();
+        assert!(app.series_list.len() >= 2);
+
+        app.select_series_index(1);
+        assert_eq!(app.selected_series_idx, 1);
+        assert_eq!(app.active_pane, ActivePane::SeriesList);
+
+        // Out-of-range tap is ignored.
+        app.select_series_index(999);
+        assert_eq!(app.selected_series_idx, 1);
+
+        // Chapter selection works and updates the active pane.
+        app.select_chapter_index(0);
+        assert_eq!(app.selected_chapter_idx, 0);
+        assert_eq!(app.active_pane, ActivePane::ChaptersList);
+
+        // First tap: not a double-tap; immediate repeat on same item: double.
+        assert!(!app.handle_tap(ActivePane::ChaptersList, 0));
+        assert!(app.handle_tap(ActivePane::ChaptersList, 0));
+        // Different item (or pane) resets the window.
+        assert!(!app.handle_tap(ActivePane::ChaptersList, 1));
     }
 }
