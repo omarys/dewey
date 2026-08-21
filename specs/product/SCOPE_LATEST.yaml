@@ -1,0 +1,79 @@
+# Dewey — Scope (Latest)
+
+core_value: "A keyboard- and touch-driven TUI manga/manhwa/comic library manager that orchestrates a local library, a reader (Continuum), and a downloader (Labrador) from a single terminal interface."
+
+summary: |
+  Dewey is a Rust TUI (ratatui + crossterm + SQLite) that scans a local
+  directory of .cbz/.zip archives, tracks series/chapter/progress in a
+  normalized SQLite database, and orchestrates two companion tools: Continuum
+  (GTK4 reader, spawned as a child process with JSON exit-payload parsing)
+  and Labrador (async downloader, spawned via tokio::process).
+
+  The current release cycle formalizes the work done in the initial
+  development session: parallel scanning, per-directory DB isolation,
+  touchscreen support, progress-bounds enforcement, multi-chapter progress
+  tracking, and low-resource (PineTab 2 / ARM) build optimizations.
+
+  The next initiative focuses on stabilizing the companion-tool integration
+  contract and hardening the scan/config paths for production use on
+  low-resource devices.
+
+in_scope:
+  - id: e01
+    name: "Companion-tool integration contract"
+    desc: "Multi-chapter progress payload from Continuum; dewey-side multi-chapter write loop; bounds clamping; backward-compatible JSON contract"
+  - id: e02
+    name: "Parallel library scanner"
+    desc: "Thread-pool parallel ZIP page-count reads; per-series error tolerance; DB-write serialization behind mutex"
+  - id: e03
+    name: "Per-directory database isolation"
+    desc: "dewey . / -l <dir> creates <dir>/.dewey.db; empty-library guard; config-driven default library_dir"
+  - id: e04
+    name: "Touchscreen support"
+    desc: "Tap-to-select, double-tap-to-open, scroll-wheel; tappable action bar; portrait-aware vertical layout"
+  - id: e05
+    name: "Library management actions"
+    desc: "Delete series (cascade + double-confirm); mark unread (clear progress); DB init/reset (--init)"
+  - id: e06
+    name: "Low-resource build optimizations"
+    desc: "LTO thin + codegen-units=1 + panic=abort + strip; tokio feature trim; native CPU build script (install.sh)"
+
+out_of_scope:
+  - item: "GUI / non-TUI interface"
+    reason: "Dewey is a TUI by design; GUI is a separate product (Continuum covers the GUI reader side)"
+  - item: "Labrador downloader implementation"
+    reason: "Labrador is a separate repo; dewey only spawns it and parses stdout"
+  - item: "Continuum reader implementation"
+    reason: "Continuum is a separate repo; dewey only spawns it and parses the exit JSON payload"
+  - item: "Cloud sync / online library management"
+    reason: "Not valuable for a local-first terminal tool; deferred indefinitely"
+  - item: "PDF/CBR/EPUB rendering"
+    reason: "Dewey detects these formats but delegates rendering to Continuum; no in-app rendering"
+  - item: "User accounts / multi-user"
+    reason: "Single-user local tool; no auth layer needed"
+  - item: "Automated migration from single dewey.db to per-directory .dewey.db"
+    reason: "Existing users with a single dewey.db in cwd can continue using it via config; no auto-migration path"
+
+constraints:
+  - "Rust 1.85+ (edition 2021); no MSRV polyfill"
+  - "SQLite via rusqlite (bundled) — no external SQLite dependency"
+  - "Companion tools (Continuum, Labrador) are separate repos with their own release cycles"
+  - "Target devices include PineTab 2 (RK3566, 4GB RAM) — memory and binary-size constraints"
+  - "No new crate dependencies unless stdlib cannot solve it"
+  - "main branch is protected; solo-git workflow (specs/state.yaml)"
+
+success_criteria:
+  - "cargo test --release passes (22+ tests) with zero failures"
+  - "cargo clippy --release -- -D warnings is clean"
+  - "cargo build --release produces a stripped binary <= 6MB"
+  - "dewey . in a directory with .cbz files creates .dewey.db and populates series/chapters"
+  - "dewey . in an empty directory prints skip message and creates no database"
+  - "Opening a chapter in Continuum and reading across multiple chapters marks all read chapters with per-chapter local page numbers (no global counters)"
+  - "Tap-to-select and double-tap-to-open work in a touch-to-mouse terminal (foot)"
+  - "Progress writes are clamped to [0, page_count] — no value exceeds the chapter's page count"
+  - "install.sh builds with -C target-cpu=native and installs to ~/.cargo/bin"
+
+references:
+  - specs/tech-architecture/tech-stack.md
+  - CLAUDE.md
+  - README.md

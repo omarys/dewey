@@ -1,0 +1,13 @@
+story_id: e02s01
+title: Parallel scan verification and stress test
+status: todo
+bcps: 2
+tasks:
+  - id: 1
+    description: "Verify parallel scan hydration test"
+    verify: "cargo test --release -- test_parallel_scan_hydrates_library"
+    status: todo
+  - id: 2
+    description: "Stress test: 2400 cbz scan completes without deadlock"
+    verify: "cargo test --release && cargo clippy --release -- -D warnings"
+    status: todo

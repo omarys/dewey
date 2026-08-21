@@ -1,0 +1,12 @@
+id: e03
+title: Per-Directory Database Isolation
+wsjf: 3.67
+total_bcps: 2
+status: todo
+stories:
+  - id: e03s01
+    title: Per-directory DB and empty-library guard verification
+    bcps: 2
+    status: todo
+    spec: e03s01-per-dir-db.md
+    tasks: e03s01-tasks.yaml

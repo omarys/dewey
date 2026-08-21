@@ -1,0 +1,21 @@
+story_id: e01s01
+title: Multi-chapter progress payload contract
+status: todo
+bcps: 5
+tasks:
+  - id: 1
+    description: "Verify multi-chapter parse test"
+    verify: "cargo test --release -- test_parse_payload_with_chapters"
+    status: todo
+  - id: 2
+    description: "Verify legacy parse test (backward compat)"
+    verify: "cargo test --release -- test_parse_payload_without_chapters"
+    status: todo
+  - id: 3
+    description: "Verify apply_chapter_progress clamps and creates unknowns"
+    verify: "cargo test --release -- test_apply_chapter_progress"
+    status: todo
+  - id: 4
+    description: "E2E on device: open 1 chapter, read 3, close, verify all 3 updated"
+    verify: "cargo test --release && cargo clippy --release -- -D warnings"
+    status: todo

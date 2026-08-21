@@ -1,0 +1,12 @@
+id: e05
+title: Library Management Actions
+wsjf: 5.5
+total_bcps: 3
+status: todo
+stories:
+  - id: e05s01
+    title: Delete series, mark unread, init/reset
+    bcps: 3
+    status: todo
+    spec: e05s01-library-actions.md
+    tasks: e05s01-tasks.yaml

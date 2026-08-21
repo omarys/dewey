@@ -1,0 +1,36 @@
+# Dewey — Vision (Latest)
+
+north_star: "A personal, keyboard- and touch-driven terminal library manager that makes reading manga/manhwa across a local archive collection feel effortless — scan, browse, read, resume, and download, all from one place."
+
+problem: |
+  Dewey orchestrates three tools: a local library (SQLite), a reader
+  (Continuum), and a downloader (Labrador). The reading experience
+  depends on a JSON payload contract between dewey and Continuum that
+  was unfinished during initial development — it reported a global
+  page number across all chapters loaded in a single reader session,
+  causing data corruption (page 1446 stored against a 15-page chapter).
+
+  The multi-chapter progress payload is now implemented but untested
+  on real hardware. The contract is the weakest link in the reading
+  flow: a contract regression in Continuum silently breaks progress
+  tracking in dewey, and vice versa.
+
+target_users:
+  - "Solo developer (Scott) reading manga/manhwa on laptop and PineTab 2"
+
+primary_use_case: |
+  1. Run `dewey .` in a library directory → scans .cbz archives, populates SQLite
+  2. Browse series/chapters in the TUI (keyboard or touchscreen)
+  3. Press Enter on a chapter → Continuum opens, suspends TUI
+  4. Read across multiple chapters in one Continuum session
+  5. Close Continuum → dewey persists per-chapter progress (local pages, clamped)
+  6. Reopen → resumes at last page read
+
+next_release_focus: "Integration stability — harden the Continuum JSON contract so multi-chapter reading works reliably and regressions are caught early."
+
+principles:
+  - "Local-first: no cloud, no accounts, no online dependencies"
+  - "Terminal-native: TUI is the interface, not a web UI or GUI"
+  - "Companion orchestration: dewey is the brain; Continuum and Labrador are separate tools it spawns"
+  - "Low-resource capable: runs on a 4GB ARM tablet with a stripped binary and parallel scan"
+  - "Per-chapter progress integrity: every page number is local to its file; no global counters; bounds-clamped writes"

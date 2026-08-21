@@ -1,0 +1,40 @@
+# specs/planning-context.yaml — written by elaborate-spec; consumed by scope-work and slice-tasks
+
+feature_name: "Continuum integration contract hardening"
+
+problem_statement: |
+  Dewey's reading experience depends on a JSON payload contract with
+  Continuum that was unfinished during initial development. The original
+  payload reported a global page number across all chapters loaded in a
+  single reader session, causing data corruption (page 1446 stored against
+  a 15-page chapter). The multi-chapter progress payload is now
+  implemented (per-chapter local pages, backward-compatible legacy
+  fields, bounds-clamped writes) but untested on real hardware. The
+  contract is the weakest link in the reading flow: a regression in
+  Continuum silently breaks progress tracking in dewey.
+
+constraints:
+  - "Personal/solo tool — no external users, no distribution beyond owner's machines"
+  - "Companion tools (Continuum, Labrador) are separate repos with their own release cycles"
+  - "Target devices include PineTab 2 (RK3566, 4GB RAM) — memory and binary-size constraints"
+  - "No new crate dependencies unless stdlib cannot solve it"
+  - "Contract must be backward-compatible: old dewey + new Continuum and vice versa"
+
+out_of_scope:
+  - "Continuum reader implementation (separate repo)"
+  - "Labrador downloader implementation (separate repo)"
+  - "GUI / non-TUI interface"
+  - "Cloud sync / online library management"
+  - "Automated migration from single dewey.db to per-directory .dewey.db"
+
+key_decisions:
+  - decision: "Per-chapter local page numbers in payload (no global counters)"
+    rationale: "The 1446/15 bug was caused by a global page counter being stored against one chapter. Local-per-file numbers make the class of bug structurally impossible."
+  - decision: "Legacy top-level last_page/completed fields kept in payload"
+    rationale: "Backward compatibility — old dewey binaries parse the legacy fields and ignore the chapters[] array; new dewey prefers chapters[] when present."
+  - decision: "Bounds clamping in upsert_progress (DB layer, not caller)"
+    rationale: "Single guard at the write root covers all callers (TUI read-back + direct-file launch). Defense-in-depth regardless of payload shape."
+  - decision: "Path-keyed chapter resolution (file_path match, not chapter_number)"
+    rationale: "Order-independent — even if Continuum loads chapters in a different order, dewey writes each row by exact file path."
+  - decision: "Contract changes require coordinated releases across both repos"
+    rationale: "dewey and Continuum are tightly coupled by the payload schema; a contract regression in either silently breaks the other."

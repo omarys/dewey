@@ -1,0 +1,17 @@
+story_id: e04s01
+title: Tap, double-tap, action bar, and portrait layout verification
+status: todo
+bcps: 2
+tasks:
+  - id: 1
+    description: "Verify tap select + double-tap detection test"
+    verify: "cargo test --release -- tap_selects_and_double_tap_detects"
+    status: todo
+  - id: 2
+    description: "Verify jump_list_top_and_bottom test (g/G)"
+    verify: "cargo test --release -- jump_list_top_and_bottom"
+    status: todo
+  - id: 3
+    description: "E2E: tap action bar Quit exits cleanly in portrait PTY"
+    verify: "cargo test --release && cargo clippy --release -- -D warnings"
+    status: todo

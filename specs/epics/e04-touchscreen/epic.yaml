@@ -1,0 +1,12 @@
+id: e04
+title: Touchscreen Support
+wsjf: 2.67
+total_bcps: 2
+status: todo
+stories:
+  - id: e04s01
+    title: Tap, double-tap, action bar, and portrait layout verification
+    bcps: 2
+    status: todo
+    spec: e04s01-touchscreen.md
+    tasks: e04s01-tasks.yaml
