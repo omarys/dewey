@@ -11,6 +11,13 @@ pub struct Series {
     pub status: Option<String>,
     pub fetch_url: Option<String>,
     pub metadata_json: Option<String>,
+    pub reading_mode: Option<String>,
+}
+
+impl Series {
+    pub fn reading_mode(&self) -> &str {
+        self.reading_mode.as_deref().unwrap_or("webtoon")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

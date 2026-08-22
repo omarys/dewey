@@ -19,6 +19,8 @@ pub struct ContinuumExitPayload {
     pub last_page: i64,
     pub completed: bool,
     #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
     pub message: Option<String>,
     /// Every chapter the user actually read this session, in reading order;
     /// absent/None keeps the legacy single-chapter contract working.
@@ -62,13 +64,15 @@ impl ContinuumRunner {
         }
     }
 
-    /// Builds the Command configured with clean --file and --page flags.
-    pub fn build_command(&self, file_path: &Path, last_page: i64) -> Command {
+    /// Builds the Command configured with clean --file, --page, and --mode flags.
+    pub fn build_command(&self, file_path: &Path, last_page: i64, mode: Option<&str>) -> Command {
         let mut cmd = Command::new(&self.binary_path);
         cmd.arg("--file")
             .arg(file_path)
             .arg("--page")
             .arg(last_page.to_string())
+            .arg("--mode")
+            .arg(mode.unwrap_or("webtoon"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd
@@ -77,7 +81,12 @@ impl ContinuumRunner {
     /// Spawns Continuum synchronously.
     /// Note: The caller MUST suspend/restore the TUI raw mode / alternate screen
     /// around this call so that stdout/signals are clean.
-    pub fn spawn_and_wait(&self, file_path: &Path, last_page: i64) -> Result<ContinuumExitPayload> {
+    pub fn spawn_and_wait(
+        &self,
+        file_path: &Path,
+        last_page: i64,
+        mode: Option<&str>,
+    ) -> Result<ContinuumExitPayload> {
         if !file_path.exists() {
             return Err(anyhow!("File does not exist: {:?}", file_path));
         }
@@ -86,10 +95,11 @@ impl ContinuumRunner {
             binary = ?self.binary_path,
             file = ?file_path,
             page = last_page,
+            mode = ?mode,
             "Launching Continuum reader process"
         );
 
-        let mut cmd = self.build_command(file_path, last_page);
+        let mut cmd = self.build_command(file_path, last_page, mode);
 
         let output = cmd.output().with_context(|| {
             format!(
@@ -125,6 +135,7 @@ impl ContinuumRunner {
             return Ok(ContinuumExitPayload {
                 last_page: fallback_page,
                 completed: false,
+                mode: None,
                 message: None,
                 chapters: None,
             });
@@ -164,14 +175,17 @@ mod tests {
     fn test_build_command_clean_args() {
         let runner = ContinuumRunner::new("continuum");
         let test_path = Path::new("/tmp/test.cbz");
-        let cmd = runner.build_command(test_path, 42);
+        let cmd = runner.build_command(test_path, 42, Some("manga"));
 
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
 
-        assert_eq!(args, vec!["--file", "/tmp/test.cbz", "--page", "42"]);
+        assert_eq!(
+            args,
+            vec!["--file", "/tmp/test.cbz", "--page", "42", "--mode", "manga"]
+        );
     }
 
     #[test]
@@ -209,13 +223,14 @@ mod tests {
 
     #[test]
     fn test_parse_payload_direct() {
-        let json = r#"{"last_page": 45, "completed": false}"#;
+        let json = r#"{"last_page": 45, "completed": false, "mode": "manga"}"#;
         let payload = ContinuumRunner::parse_payload(json, 0).unwrap();
         assert_eq!(
             payload,
             ContinuumExitPayload {
                 last_page: 45,
                 completed: false,
+                mode: Some("manga".to_string()),
                 message: None,
                 chapters: None,
             }
@@ -238,13 +253,14 @@ mod tests {
 
     #[test]
     fn test_parse_payload_with_logs() {
-        let output = "QML debugging enabled\nLoaded 48 pages\n{\"last_page\": 12, \"completed\": true}\nExiting.";
+        let output = "QML debugging enabled\nLoaded 48 pages\n{\"last_page\": 12, \"completed\": true, \"mode\": \"webtoon\"}\nExiting.";
         let payload = ContinuumRunner::parse_payload(output, 0).unwrap();
         assert_eq!(
             payload,
             ContinuumExitPayload {
                 last_page: 12,
                 completed: true,
+                mode: Some("webtoon".to_string()),
                 message: None,
                 chapters: None,
             }

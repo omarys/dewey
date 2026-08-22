@@ -74,8 +74,12 @@ impl Database {
         conn.execute_batch(schema::CREATE_SCHEMA)
             .context("Failed to initialize database schema")?;
 
-        // Run non-destructive column migrations if existing database is missing fetch_url
+        // Run non-destructive column migrations if existing database is missing columns
         let _ = conn.execute("ALTER TABLE series ADD COLUMN fetch_url TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE series ADD COLUMN reading_mode TEXT DEFAULT 'webtoon'",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE chapters ADD COLUMN fetch_url TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path)",
@@ -100,7 +104,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT
-                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json,
+                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json, s.reading_mode,
                 COUNT(c.id) AS total_count,
                 SUM(CASE WHEN c.file_path IS NOT NULL AND c.file_path != '' THEN 1 ELSE 0 END) AS downloaded_count,
                 SUM(CASE WHEN p.is_completed = 1 THEN 1 ELSE 0 END) AS completed_count,
@@ -123,13 +127,14 @@ impl Database {
                     status: row.get(4)?,
                     fetch_url: row.get(5)?,
                     metadata_json: row.get(6)?,
+                    reading_mode: row.get(7)?,
                 };
 
-                let total_count: i64 = row.get(7).unwrap_or(0);
-                let downloaded_count: i64 = row.get(8).unwrap_or(0);
-                let completed_count: i64 = row.get(9).unwrap_or(0);
-                let latest_read_chap: Option<f64> = row.get(10)?;
-                let latest_read_time_str: Option<String> = row.get(11)?;
+                let total_count: i64 = row.get(8).unwrap_or(0);
+                let downloaded_count: i64 = row.get(9).unwrap_or(0);
+                let completed_count: i64 = row.get(10).unwrap_or(0);
+                let latest_read_chap: Option<f64> = row.get(11)?;
+                let latest_read_time_str: Option<String> = row.get(12)?;
 
                 let last_read_at = latest_read_time_str.and_then(|s| {
                     DateTime::parse_from_rfc3339(&s)
@@ -428,6 +433,15 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_series_reading_mode(&self, series_id: i64, reading_mode: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE series SET reading_mode = ?1 WHERE id = ?2",
+            params![reading_mode, series_id],
+        )?;
+        Ok(())
+    }
+
     pub fn insert_or_get_series(&self, title: &str) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         self.insert_or_get_series_inner(&conn, title, None)
@@ -631,6 +645,31 @@ impl Database {
         self.upsert_progress(chapter_id, last_page, completed)?;
         Ok(chapter_id)
     }
+
+    pub fn get_series_id_for_chapter(&self, chapter_id: i64) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let sid = conn
+            .query_row(
+                "SELECT series_id FROM chapters WHERE id = ?1",
+                params![chapter_id],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(sid)
+    }
+
+    pub fn get_series_reading_mode_for_chapter(&self, chapter_id: i64) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let mode: Option<String> = conn
+            .query_row(
+                "SELECT s.reading_mode FROM series s JOIN chapters c ON s.id = c.series_id WHERE c.id = ?1",
+                params![chapter_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(mode.unwrap_or_else(|| "webtoon".to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -694,6 +733,18 @@ mod tests {
             solo_updated2.series.fetch_url,
             Some("https://solo.example.com".to_string())
         );
+
+        // Test updating reading mode
+        assert_eq!(solo.series.reading_mode(), "webtoon");
+        db.update_series_reading_mode(solo.series.id, "manga")
+            .unwrap();
+
+        let reloaded_series3 = db.get_all_series().unwrap();
+        let solo_updated3 = reloaded_series3
+            .iter()
+            .find(|s| s.series.title == "Solo Leveling")
+            .unwrap();
+        assert_eq!(solo_updated3.series.reading_mode(), "manga");
     }
 
     #[test]

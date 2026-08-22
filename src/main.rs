@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
         let abs_path = std::fs::canonicalize(target_file).unwrap_or(target_file.clone());
         let chapter_id = db.get_or_create_chapter_for_file(&abs_path)?;
 
-        let (last_page, chapter_num) = {
+        let (series_id, last_page, chapter_num, series_mode) = {
             let conn = db.get_progress_for_file(&abs_path)?;
             let p = conn
                 .as_ref()
@@ -167,17 +167,28 @@ async fn main() -> Result<()> {
                 .unwrap_or(0);
             let num =
                 crate::scanner::LibraryScanner::parse_chapter_number(&abs_path).unwrap_or(1.0);
-            (p, num)
+            let sid = db.get_series_id_for_chapter(chapter_id).ok().flatten();
+            let mode = db
+                .get_series_reading_mode_for_chapter(chapter_id)
+                .unwrap_or_else(|_| "webtoon".to_string());
+            (sid, p, num, mode)
         };
 
         println!(
-            "📖 Opening {:?} in Continuum at page {}...",
+            "📖 Opening {:?} in Continuum ({} mode) at page {}...",
             abs_path.file_name().unwrap_or_default(),
+            series_mode,
             last_page
         );
 
         let runner = ContinuumRunner::new(&config.continuum_bin);
-        let result = runner.spawn_and_wait(&abs_path, last_page)?;
+        let result = runner.spawn_and_wait(&abs_path, last_page, Some(&series_mode))?;
+
+        if let Some(new_mode) = &result.mode {
+            if let Some(sid) = series_id {
+                let _ = db.update_series_reading_mode(sid, new_mode);
+            }
+        }
 
         // Persist progress for every chapter the reader actually touched;
         // fall back to the legacy single-chapter contract when absent.
@@ -287,6 +298,14 @@ async fn main() -> Result<()> {
                         (KeyCode::Char('m'), KeyModifiers::NONE) => {
                             if let Err(err) = app.toggle_completed_selected() {
                                 app.set_toast(format!("Failed to toggle status: {}", err), true);
+                            }
+                        }
+                        (KeyCode::Char('M'), _) | (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                            if let Err(err) = app.toggle_reading_mode_selected() {
+                                app.set_toast(
+                                    format!("Failed to toggle reading mode: {}", err),
+                                    true,
+                                );
                             }
                         }
                         (KeyCode::Char('u'), KeyModifiers::NONE) => {

@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS series (
     cover_path TEXT,
     status TEXT,
     fetch_url TEXT,
-    metadata_json TEXT
+    metadata_json TEXT,
+    reading_mode TEXT DEFAULT 'webtoon'
 );
 
 CREATE TABLE IF NOT EXISTS chapters (

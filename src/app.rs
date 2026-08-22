@@ -408,16 +408,25 @@ impl App {
         let chapter_id = current_chap.chapter.id;
         let chapter_num = current_chap.chapter.chapter_number;
 
+        let (series_id, series_mode) = self
+            .current_series()
+            .map(|s| (Some(s.series.id), s.series.reading_mode().to_string()))
+            .unwrap_or((None, "webtoon".to_string()));
+
         info!(
             chapter_id,
             chapter_num,
             file = ?file_path,
             last_page,
+            mode = %series_mode,
             "Suspending TUI to spawn Continuum reader"
         );
 
         self.set_toast(
-            format!("Reading Chapter {:.1} in Continuum...", chapter_num),
+            format!(
+                "Reading Chapter {:.1} in Continuum ({} mode)...",
+                chapter_num, series_mode
+            ),
             false,
         );
 
@@ -425,7 +434,9 @@ impl App {
         tui.suspend()?;
 
         // 2. Launch Continuum child process & wait for stdout exit payload
-        let result = self.continuum_runner.spawn_and_wait(&file_path, last_page);
+        let result =
+            self.continuum_runner
+                .spawn_and_wait(&file_path, last_page, Some(&series_mode));
 
         // 3. Resume TUI terminal mode
         tui.resume()?;
@@ -437,8 +448,16 @@ impl App {
                     chapter_id,
                     last_page = payload.last_page,
                     completed = payload.completed,
+                    mode = ?payload.mode,
                     "Continuum closed. Updating SQLite progress table."
                 );
+
+                // Update series reading mode if returned from Continuum
+                if let Some(new_mode) = &payload.mode {
+                    if let Some(sid) = series_id {
+                        let _ = self.db.update_series_reading_mode(sid, new_mode);
+                    }
+                }
 
                 // Persist progress for every chapter the reader actually
                 // touched; fall back to the legacy single-chapter contract
@@ -618,6 +637,30 @@ impl App {
         }
     }
 
+    /// Toggles reading mode (Webtoon <-> Manga) for the selected series.
+    pub fn toggle_reading_mode_selected(&mut self) -> Result<()> {
+        if let Some(s) = self.current_series() {
+            let series_id = s.series.id;
+            let current_mode = s.series.reading_mode();
+            let new_mode = if current_mode == "manga" {
+                "webtoon"
+            } else {
+                "manga"
+            };
+            self.db.update_series_reading_mode(series_id, new_mode)?;
+            self.reload_series()?;
+
+            let display_name = match new_mode {
+                "manga" => "Manga (Horizontal)",
+                _ => "Webtoon (Vertical)",
+            };
+            self.set_toast(format!("Reading mode set to {}", display_name), false);
+        } else {
+            self.set_toast("No series selected", true);
+        }
+        Ok(())
+    }
+
     /// Toggle chapter completed / uncompleted status for the selected chapter.
     pub fn toggle_completed_selected(&mut self) -> Result<()> {
         if let Some(chap) = self.current_chapter() {
@@ -794,5 +837,23 @@ mod tests {
         assert_eq!(app.selected_chapter_idx, app.chapters_list.len() - 1);
         app.jump_list_top();
         assert_eq!(app.selected_chapter_idx, 0);
+    }
+
+    #[test]
+    fn test_toggle_reading_mode_selected() {
+        let mut app = test_app();
+        assert_eq!(
+            app.current_series().unwrap().series.reading_mode(),
+            "webtoon"
+        );
+
+        app.toggle_reading_mode_selected().unwrap();
+        assert_eq!(app.current_series().unwrap().series.reading_mode(), "manga");
+
+        app.toggle_reading_mode_selected().unwrap();
+        assert_eq!(
+            app.current_series().unwrap().series.reading_mode(),
+            "webtoon"
+        );
     }
 }

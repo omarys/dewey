@@ -315,6 +315,10 @@ pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) 
             .unwrap_or_else(|| "General".to_string());
 
         let cover_str = s.series.cover_path.as_deref().unwrap_or("None");
+        let mode_display = match s.series.reading_mode() {
+            "manga" => "Manga (Horizontal)",
+            _ => "Webtoon (Vertical)",
+        };
         let fetch_url_str = s
             .series
             .fetch_url
@@ -341,6 +345,8 @@ pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) 
                     s.series.status.as_deref().unwrap_or("Unknown"),
                     Style::default().fg(theme.warning),
                 ),
+                Span::styled("   Mode: ", Style::default().fg(theme.muted_fg)),
+                Span::styled(mode_display, Style::default().fg(theme.accent)),
                 Span::styled("   Cover: ", Style::default().fg(theme.muted_fg)),
                 Span::styled(cover_str, Style::default().fg(theme.muted_fg)),
             ]),
@@ -529,6 +535,13 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ),
         Span::styled("Mark Read  ", Style::default().fg(theme.fg)),
         Span::styled(
+            " [M] ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Mode  ", Style::default().fg(theme.fg)),
+        Span::styled(
             " [Tab] ",
             Style::default()
                 .fg(theme.accent)
@@ -568,39 +581,41 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
     }
 
-    let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Reset));
+    let p = Paragraph::new(Line::from(spans))
+        .alignment(Alignment::Left)
+        .style(Style::default().bg(theme.bg));
     f.render_widget(p, area);
 }
 
 pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
-    let area = centered_rect(65, 55, f.area());
+    let area = centered_rect(65, 75, f.area());
     f.render_widget(Clear, area);
 
     let help_text = vec![
-        Line::from(Span::styled(
-            "DEWEY — Keyboard Navigation & Commands",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
         Line::from(vec![
             Span::styled(
-                "  j / k or ↓ / ↑        ",
+                "  j / Down              ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Navigate item up / down"),
+            Span::raw("Next item in active list"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  k / Up                ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Previous item in active list"),
         ]),
         Line::from(vec![
             Span::styled(
                 "  g / G                 ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Jump to list top / bottom"),
+            Span::raw("Jump to top / bottom of active list"),
         ]),
         Line::from(vec![
             Span::styled(
-                "  h / l or Tab / S-Tab  ",
+                "  Tab / h / l / Arrows  ",
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Switch active pane (Series ↔ Chapters)"),
@@ -639,6 +654,13 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Toggle chapter completed / uncompleted"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  M / v                 ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Toggle series reading mode (Webtoon ↔ Manga)"),
         ]),
         Line::from(vec![
             Span::styled(
