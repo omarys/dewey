@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Dewey
+GenericName=Manga & Comic Library Manager
+Comment=TUI Library Manager for Continuum and Labrador
+Exec=foot -T "Dewey" -a dewey dewey
+Icon=dewey
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;
+StartupWMClass=dewey
+Keywords=manga;manhwa;comic;reader;continuum;labrador;library;tui;

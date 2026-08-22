@@ -19,7 +19,7 @@ Dewey acts as the central orchestration "brain" between your local library, read
 - 🗄️ **SQLite Persistence**: Normalized database tracking series metadata, chapter records, reading progress, completed states, and source URLs.
 - 📖 **Seamless Continuum Reader Integration**:
   - Automatically resumes reading from the exact `last_page_read`.
-  - Spawns Continuum with `--file <path> --page <num> --tui`.
+  - Spawns Continuum with `--file <path> --page <num>`.
   - Suspends and resumes the terminal cleanly around the GUI reader session.
   - Captures stdout JSON payloads on close to persist reading state.
   - Displays celebratory completion toasts when finishing chapters.
@@ -217,15 +217,16 @@ cargo clippy -- -D warnings
 cargo build --release
 ```
 
-### Native Device Build (internal)
+### Native Device Build & Desktop Shortcut (internal)
 
 For maximum performance on a specific machine — especially a low-resource
 ARM device like the PineTab 2 — build with CPU-native optimizations. The
 compiler then uses every instruction the local CPU supports (NEON/SIMD on
-ARM, AVX on x86):
+ARM, AVX on x86). `install.sh` also sets up the desktop application shortcut
+and icon for launching in the `foot` terminal:
 
 ```bash
-./install.sh        # builds with -C target-cpu=native and installs to ~/.cargo/bin
+./install.sh        # builds with -C target-cpu=native and installs binary, desktop entry & icon
 # or: DEWEY_PREFIX=/opt/bin ./install.sh
 ```
 
