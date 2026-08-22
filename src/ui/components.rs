@@ -453,46 +453,196 @@ pub fn render_downloads_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme)
     f.render_widget(paragraph, area);
 }
 
-/// Footer tap targets: one tappable button per action; records their screen
-/// rects so taps can be hit-tested. Mirrors the keyboard shortcuts.
-const ACTION_LABELS: [(&str, AppAction); 7] = [
-    ("Open", AppAction::Open),
-    ("Fetch", AppAction::Fetch),
-    ("Next", AppAction::FetchNext),
-    ("Scan", AppAction::Scan),
-    ("Reset", AppAction::Reset),
-    ("Delete", AppAction::Delete),
-    ("Quit", AppAction::Quit),
-];
+pub fn render_portrait_tab_bar(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    app.tab_rects.clear();
 
-pub fn render_action_bar(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    app.action_rects.clear();
-    let n = ACTION_LABELS.len() as u16;
-    let cells = Layout::default()
+    let tab_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(vec![Constraint::Percentage(100 / n); n as usize])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    for (cell, (label, action)) in cells.iter().zip(ACTION_LABELS.iter()) {
-        app.action_rects.push((*cell, *action));
-        let text = format!("{} {}", label, action_key(*action));
-        let span = Span::styled(text, Style::default().fg(theme.accent));
-        let p = Paragraph::new(Line::from(vec![span]))
-            .alignment(Alignment::Center)
-            .style(Style::default().bg(theme.bg));
-        f.render_widget(p, *cell);
+    let series_is_active = app.active_pane == ActivePane::SeriesList;
+    let series_count = app.series_list.len();
+    let series_title = format!(" 📚 1. Series ({}) ", series_count);
+
+    let (series_border, series_style) = if series_is_active {
+        (theme.active_border(), theme.block_title_focused())
+    } else {
+        (theme.inactive_border(), theme.block_title_normal())
+    };
+
+    let series_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(series_border)
+        .title(Span::styled(series_title, series_style));
+
+    let series_summary = if series_is_active {
+        Span::styled(
+            app.current_series()
+                .map(|s| s.series.title.as_str())
+                .unwrap_or("No selection"),
+            Style::default()
+                .fg(theme.highlight_fg)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("Tap to view Series", Style::default().fg(theme.muted_fg))
+    };
+
+    let p_series = Paragraph::new(Line::from(vec![
+        Span::raw(if series_is_active { "▶ " } else { "  " }),
+        series_summary,
+    ]))
+    .alignment(Alignment::Center)
+    .block(series_block);
+    f.render_widget(p_series, tab_chunks[0]);
+    app.tab_rects.push((tab_chunks[0], ActivePane::SeriesList));
+
+    let chapters_is_active = app.active_pane == ActivePane::ChaptersList;
+    let chapters_count = app.chapters_list.len();
+    let chapters_title = format!(" 📖 2. Chapters ({}) ", chapters_count);
+
+    let (chapters_border, chapters_style) = if chapters_is_active {
+        (theme.active_border(), theme.block_title_focused())
+    } else {
+        (theme.inactive_border(), theme.block_title_normal())
+    };
+
+    let chapters_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(chapters_border)
+        .title(Span::styled(chapters_title, chapters_style));
+
+    let chapters_summary = if chapters_is_active {
+        Span::styled(
+            app.current_chapter()
+                .map(|c| format!("Ch. {:.1}", c.chapter.chapter_number))
+                .unwrap_or_else(|| "No selection".to_string()),
+            Style::default()
+                .fg(theme.highlight_fg)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("Tap to view Chapters", Style::default().fg(theme.muted_fg))
+    };
+
+    let p_chapters = Paragraph::new(Line::from(vec![
+        Span::raw(if chapters_is_active { "▶ " } else { "  " }),
+        chapters_summary,
+    ]))
+    .alignment(Alignment::Center)
+    .block(chapters_block);
+    f.render_widget(p_chapters, tab_chunks[1]);
+    app.tab_rects
+        .push((tab_chunks[1], ActivePane::ChaptersList));
+}
+
+/// Touch tap targets: records screen rects so taps can be hit-tested.
+pub fn render_action_bar(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    theme: &Theme,
+    is_portrait: bool,
+) {
+    app.action_rects.clear();
+
+    if is_portrait && area.height >= 2 {
+        let row_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+
+        let row1_actions = [
+            ("📖 Read", AppAction::Open),
+            ("⬇ Fetch", AppAction::Fetch),
+            ("⏭ Next", AppAction::FetchNext),
+            ("🔄 Mode", AppAction::Mode),
+        ];
+
+        let row2_actions = [
+            ("✓ Mark", AppAction::MarkRead),
+            ("🔍 Scan", AppAction::Scan),
+            ("🗑 Del", AppAction::Delete),
+            ("❌ Quit", AppAction::Quit),
+        ];
+
+        for (actions, row_area) in [
+            (&row1_actions, row_chunks[0]),
+            (&row2_actions, row_chunks[1]),
+        ] {
+            let n = actions.len() as u16;
+            let cells = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(vec![Constraint::Percentage(100 / n); n as usize])
+                .split(row_area);
+
+            for (cell, (label, action)) in cells.iter().zip(actions.iter()) {
+                app.action_rects.push((*cell, *action));
+                let key = action_key(*action);
+                let text = format!("{} [{}]", label, key);
+                let fg_color = if *action == AppAction::Quit {
+                    theme.error
+                } else {
+                    theme.accent
+                };
+                let p = Paragraph::new(Line::from(vec![Span::styled(
+                    text,
+                    Style::default().fg(fg_color).add_modifier(Modifier::BOLD),
+                )]))
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.highlight_bg));
+                f.render_widget(p, *cell);
+            }
+        }
+    } else {
+        let actions = [
+            ("📖 Read", AppAction::Open),
+            ("⬇ Fetch", AppAction::Fetch),
+            ("⏭ Next", AppAction::FetchNext),
+            ("🔄 Mode", AppAction::Mode),
+            ("✓ Mark", AppAction::MarkRead),
+            ("🔍 Scan", AppAction::Scan),
+            ("🗑 Del", AppAction::Delete),
+            ("❌ Quit", AppAction::Quit),
+        ];
+        let n = actions.len() as u16;
+        let cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Percentage(100 / n); n as usize])
+            .split(area);
+
+        for (cell, (label, action)) in cells.iter().zip(actions.iter()) {
+            app.action_rects.push((*cell, *action));
+            let text = format!("{} {}", label, action_key(*action));
+            let fg_color = if *action == AppAction::Quit {
+                theme.error
+            } else {
+                theme.accent
+            };
+            let span = Span::styled(text, Style::default().fg(fg_color));
+            let p = Paragraph::new(Line::from(vec![span]))
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.bg));
+            f.render_widget(p, *cell);
+        }
     }
 }
 
-/// The keyboard shortcut behind each action (for the touch users' memory).
+/// The keyboard shortcut behind each action.
 fn action_key(action: AppAction) -> &'static str {
     match action {
         AppAction::Open => "↵",
         AppAction::Fetch => "d",
         AppAction::FetchNext => "D",
+        AppAction::Mode => "M",
+        AppAction::MarkRead => "m",
         AppAction::Scan => "s",
         AppAction::Reset => "u",
         AppAction::Delete => "x",
+        AppAction::SwitchPane => "Tab",
         AppAction::Quit => "q",
     }
 }

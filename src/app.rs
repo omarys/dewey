@@ -23,14 +23,18 @@ pub enum ActivePane {
 
 /// One-shot actions exposed as tappable buttons in the footer action bar
 /// (touchscreen-friendly mirror of the keyboard shortcuts).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppAction {
     Open,
     Fetch,
     FetchNext,
+    Mode,
+    MarkRead,
     Scan,
     Reset,
     Delete,
+    SwitchPane,
     Quit,
 }
 
@@ -68,7 +72,9 @@ pub struct App {
     /// Last-frame render areas, used to hit-test taps.
     pub series_rect: Option<Rect>,
     pub chapters_rect: Option<Rect>,
-    /// Tappable action-bar buttons rendered by the footer.
+    /// Tappable tab navigation buttons in portrait mode.
+    pub tab_rects: Vec<(Rect, ActivePane)>,
+    /// Tappable action-bar buttons rendered by the footer / touch bar.
     pub action_rects: Vec<(Rect, AppAction)>,
     /// (time, pane, index) of the previous left-click, for double-tap open.
     pub last_tap: Option<(Instant, ActivePane, usize)>,
@@ -106,6 +112,7 @@ impl App {
             pending_delete_id: None,
             series_rect: None,
             chapters_rect: None,
+            tab_rects: Vec::new(),
             action_rects: Vec::new(),
             last_tap: None,
             event_tx,

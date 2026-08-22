@@ -366,16 +366,17 @@ async fn main() -> Result<()> {
                     let x = mouse.column;
                     let y = mouse.row;
 
-                    let hit_series = app.series_rect.is_some_and(|r| {
-                        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
-                    });
-                    let hit_chapters = app.chapters_rect.is_some_and(|r| {
-                        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
-                    });
-
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            // Action-bar buttons take precedence over list taps.
+                            // 1. Check navigation tabs (in portrait mode)
+                            if let Some((_, pane)) = app.tab_rects.iter().find(|(r, _)| {
+                                x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+                            }) {
+                                app.active_pane = *pane;
+                                continue;
+                            }
+
+                            // 2. Action-bar buttons take precedence over list taps.
                             if let Some((_, action)) = app.action_rects.iter().find(|(r, _)| {
                                 x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
                             }) {
@@ -391,6 +392,22 @@ async fn main() -> Result<()> {
                                     AppAction::FetchNext => {
                                         app.download_next_unread_chapter();
                                     }
+                                    AppAction::Mode => {
+                                        if let Err(err) = app.toggle_reading_mode_selected() {
+                                            app.set_toast(
+                                                format!("Failed to toggle reading mode: {}", err),
+                                                true,
+                                            );
+                                        }
+                                    }
+                                    AppAction::MarkRead => {
+                                        if let Err(err) = app.toggle_completed_selected() {
+                                            app.set_toast(
+                                                format!("Failed to toggle status: {}", err),
+                                                true,
+                                            );
+                                        }
+                                    }
                                     AppAction::Scan => {
                                         app.set_toast("Scanning library in background...", false);
                                         app.spawn_background_scan();
@@ -401,58 +418,120 @@ async fn main() -> Result<()> {
                                     AppAction::Delete => {
                                         app.request_delete_selected();
                                     }
+                                    AppAction::SwitchPane => {
+                                        app.switch_pane_forward();
+                                    }
                                     AppAction::Quit => {
                                         app.should_quit = true;
                                     }
                                 }
-                            } else if hit_series {
-                                if let Some(rect) = app.series_rect {
-                                    let idx = y.saturating_sub(rect.y) as usize;
-                                    if idx < app.series_list.len() {
-                                        app.select_series_index(idx);
-                                        if app.handle_tap(ActivePane::SeriesList, idx) {
-                                            if let Err(err) = app.handle_enter_action(&mut tui) {
-                                                app.set_toast(
-                                                    format!("Action failed: {}", err),
-                                                    true,
-                                                );
+                                continue;
+                            }
+
+                            // 3. Exact hit-test for Series list (accounting for top border and list offset)
+                            if let Some(rect) = app.series_rect {
+                                if x >= rect.x && x < rect.x + rect.width {
+                                    if y > rect.y && y < rect.y + rect.height.saturating_sub(1) {
+                                        let visible_row = (y - (rect.y + 1)) as usize;
+                                        let target_idx = app.series_state.offset() + visible_row;
+                                        if target_idx < app.series_list.len() {
+                                            app.select_series_index(target_idx);
+                                            if app.handle_tap(ActivePane::SeriesList, target_idx) {
+                                                if let Err(err) = app.handle_enter_action(&mut tui)
+                                                {
+                                                    app.set_toast(
+                                                        format!("Action failed: {}", err),
+                                                        true,
+                                                    );
+                                                }
                                             }
                                         }
+                                        continue;
+                                    } else if y == rect.y {
+                                        app.active_pane = ActivePane::SeriesList;
                                     }
                                 }
-                            } else if hit_chapters {
-                                if let Some(rect) = app.chapters_rect {
-                                    let idx = y.saturating_sub(rect.y) as usize;
-                                    if idx < app.chapters_list.len() {
-                                        app.select_chapter_index(idx);
-                                        if app.handle_tap(ActivePane::ChaptersList, idx) {
-                                            if let Err(err) = app.handle_enter_action(&mut tui) {
-                                                app.set_toast(
-                                                    format!("Action failed: {}", err),
-                                                    true,
-                                                );
+                            }
+
+                            // 4. Exact hit-test for Chapters table (accounting for border, table header, and scroll offset)
+                            if let Some(rect) = app.chapters_rect {
+                                if x >= rect.x && x < rect.x + rect.width {
+                                    if y >= rect.y + 2 && y < rect.y + rect.height.saturating_sub(1)
+                                    {
+                                        let visible_row = (y - (rect.y + 2)) as usize;
+                                        let target_idx = app.chapters_state.offset() + visible_row;
+                                        if target_idx < app.chapters_list.len() {
+                                            app.select_chapter_index(target_idx);
+                                            if app.handle_tap(ActivePane::ChaptersList, target_idx)
+                                            {
+                                                if let Err(err) = app.handle_enter_action(&mut tui)
+                                                {
+                                                    app.set_toast(
+                                                        format!("Action failed: {}", err),
+                                                        true,
+                                                    );
+                                                }
                                             }
                                         }
+                                        continue;
+                                    } else if y == rect.y || y == rect.y + 1 {
+                                        app.active_pane = ActivePane::ChaptersList;
                                     }
                                 }
                             }
                         }
                         MouseEventKind::ScrollDown => {
-                            if hit_series && !app.series_list.is_empty() {
-                                let n = app.series_list.len();
-                                app.select_series_index((app.selected_series_idx + 1) % n);
-                            } else if hit_chapters && !app.chapters_list.is_empty() {
-                                let n = app.chapters_list.len();
-                                app.select_chapter_index((app.selected_chapter_idx + 1) % n);
+                            if let Some(rect) = app.series_rect {
+                                if x >= rect.x
+                                    && x < rect.x + rect.width
+                                    && y >= rect.y
+                                    && y < rect.y + rect.height
+                                    && !app.series_list.is_empty()
+                                {
+                                    let n = app.series_list.len();
+                                    app.select_series_index(
+                                        (app.selected_series_idx + 1).min(n - 1),
+                                    );
+                                }
+                            }
+                            if let Some(rect) = app.chapters_rect {
+                                if x >= rect.x
+                                    && x < rect.x + rect.width
+                                    && y >= rect.y
+                                    && y < rect.y + rect.height
+                                    && !app.chapters_list.is_empty()
+                                {
+                                    let n = app.chapters_list.len();
+                                    app.select_chapter_index(
+                                        (app.selected_chapter_idx + 1).min(n - 1),
+                                    );
+                                }
                             }
                         }
                         MouseEventKind::ScrollUp => {
-                            if hit_series && !app.series_list.is_empty() {
-                                let n = app.series_list.len();
-                                app.select_series_index((app.selected_series_idx + n - 1) % n);
-                            } else if hit_chapters && !app.chapters_list.is_empty() {
-                                let n = app.chapters_list.len();
-                                app.select_chapter_index((app.selected_chapter_idx + n - 1) % n);
+                            if let Some(rect) = app.series_rect {
+                                if x >= rect.x
+                                    && x < rect.x + rect.width
+                                    && y >= rect.y
+                                    && y < rect.y + rect.height
+                                    && !app.series_list.is_empty()
+                                {
+                                    app.select_series_index(
+                                        app.selected_series_idx.saturating_sub(1),
+                                    );
+                                }
+                            }
+                            if let Some(rect) = app.chapters_rect {
+                                if x >= rect.x
+                                    && x < rect.x + rect.width
+                                    && y >= rect.y
+                                    && y < rect.y + rect.height
+                                    && !app.chapters_list.is_empty()
+                                {
+                                    app.select_chapter_index(
+                                        app.selected_chapter_idx.saturating_sub(1),
+                                    );
+                                }
                             }
                         }
                         _ => {}
