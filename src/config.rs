@@ -36,8 +36,10 @@ impl Default for Config {
 
         Self {
             library_dir: default_library,
-            db_path: PathBuf::from("dewey.db"),
-            log_file: PathBuf::from("dewey.log"),
+            // Canonical user-level locations (XDG-style) so config-less runs
+            // never drop databases/logs into arbitrary cwd directories.
+            db_path: PathBuf::from(format!("{}/.local/share/dewey/dewey.db", home)),
+            log_file: PathBuf::from(format!("{}/.local/state/dewey/dewey.log", home)),
             continuum_bin: PathBuf::from("continuum"),
             labrador_bin: PathBuf::from("labrador"),
             auto_scan_on_startup: true,
@@ -77,6 +79,26 @@ impl Config {
             let mut cfg: Config = toml::from_str(&content)
                 .with_context(|| format!("Failed to parse config file {:?}", path))?;
             cfg.resolve_tilde();
+
+            // Legacy configs generated before canonical XDG defaults used
+            // cwd-relative db_path/log_file ("dewey.db"/"dewey.log"), which
+            // duplicated files into every launch directory. Upgrade them to
+            // the canonical defaults and persist the fix.
+            let defaults = Config::default();
+            let mut migrated = false;
+            if cfg.db_path.is_relative() {
+                cfg.db_path = defaults.db_path;
+                migrated = true;
+            }
+            if cfg.log_file.is_relative() {
+                cfg.log_file = defaults.log_file;
+                migrated = true;
+            }
+            if migrated {
+                if let Ok(toml_str) = toml::to_string_pretty(&cfg) {
+                    let _ = fs::write(&path, toml_str);
+                }
+            }
             Ok(cfg)
         } else {
             let cfg = Config::default();
@@ -91,9 +113,10 @@ impl Config {
     }
 
     pub fn default_config_path() -> PathBuf {
-        if Path::new("dewey.toml").exists() {
-            PathBuf::from("dewey.toml")
-        } else if let Ok(home) = std::env::var("HOME") {
+        // Always the user-level config; never a cwd-relative dewey.toml, so
+        // launching from different directories cannot create per-dir configs.
+        // Pass -c to use a specific config file explicitly.
+        if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(format!("{}/.config/dewey/config.toml", home))
         } else {
             PathBuf::from("dewey.toml")
@@ -129,5 +152,16 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.continuum_bin, PathBuf::from("continuum"));
         assert_eq!(cfg.labrador_bin, PathBuf::from("labrador"));
+        // Canonical defaults are user-level, never cwd-relative.
+        assert!(cfg
+            .db_path
+            .to_string_lossy()
+            .contains(".local/share/dewey/dewey.db"));
+        assert!(cfg
+            .log_file
+            .to_string_lossy()
+            .contains(".local/state/dewey/dewey.log"));
+        assert!(cfg.db_path.is_absolute());
+        assert!(cfg.log_file.is_absolute());
     }
 }

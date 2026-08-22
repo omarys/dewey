@@ -115,11 +115,11 @@ Dewey looks for a configuration file in `dewey.toml` (current directory) or `~/.
 # Path to your comics / manga library directory
 library_dir = "~/Documents/Books"
 
-# Path to SQLite database file
-db_path = "dewey.db"
+# Path to SQLite database file (defaults to ~/.local/share/dewey/dewey.db when unset)
+db_path = "~/.local/share/dewey/dewey.db"
 
-# Log file path
-log_file = "dewey.log"
+# Log file path (defaults to ~/.local/state/dewey/dewey.log when unset)
+log_file = "~/.local/state/dewey/dewey.log"
 
 # Binary names or paths for companion tools
 continuum_bin = "continuum"

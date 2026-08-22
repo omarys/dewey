@@ -15,7 +15,7 @@ use tracing::warn;
 use crate::db::{ChapterScanEntry, Database};
 
 static RE_CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:chapter|chap|ch|\bc|#)[_\s\.]*([0-9]+(?:\.[0-9]+)?)"#)
+    Regex::new(r#"(?i)(?:chapter|chap|episode|ep|ch|vol|v|\bc|#)[_\s\.]*([0-9]+(?:\.[0-9]+)?)"#)
         .expect("invalid regex")
 });
 static RE_BRACKET: LazyLock<Regex> =
@@ -183,6 +183,9 @@ impl LibraryScanner {
 
                     // Diff check: if file is already indexed with page_count, skip opening zip
                     if let Some(info) = existing_map.get(&path_str) {
+                        if (info.chapter_number - chap_num).abs() > 0.001 {
+                            let _ = db.update_chapter_number(info.id, chap_num);
+                        }
                         if info.page_count.is_some() {
                             continue;
                         }
@@ -416,6 +419,41 @@ mod tests {
     use super::*;
     use crate::db::Database;
     use std::io::Write;
+
+    #[test]
+    fn test_parse_episode_names() {
+        // Real-world conventions: release-index bracket + episode number.
+        assert_eq!(
+            LibraryScanner::parse_chapter_number(Path::new("[0000]_Episode_209_Aug_15.cbz")),
+            Some(209.0)
+        );
+        assert_eq!(
+            LibraryScanner::parse_chapter_number(Path::new("[0001]_Episode_208_Aug_7.cbz")),
+            Some(208.0)
+        );
+        assert_eq!(
+            LibraryScanner::parse_chapter_number(Path::new("[0208]_Episode_1_Sep_7_2024.cbz")),
+            Some(1.0)
+        );
+        // Chapter-style names are unaffected by the episode keywords.
+        assert_eq!(
+            LibraryScanner::parse_chapter_number(Path::new("[0000]_Chapter_40.6_Apr_4.cbz")),
+            Some(40.6)
+        );
+        assert_eq!(
+            LibraryScanner::parse_chapter_number(Path::new("[0001]_Chapter_1.cbz")),
+            Some(1.0)
+        );
+        // Episode/volume shorthand.
+        assert_eq!(
+            LibraryScanner::parse_chapter_number(Path::new("Ep. 5.cbz")),
+            Some(5.0)
+        );
+        assert_eq!(
+            LibraryScanner::parse_chapter_number(Path::new("Vol 3.cbz")),
+            Some(3.0)
+        );
+    }
 
     #[test]
     fn test_parse_bracketed_chapter_names() {

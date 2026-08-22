@@ -60,6 +60,9 @@ struct Cli {
 }
 
 fn init_logging(log_path: &Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let file_appender = tracing_appender::rolling::never(
         log_path.parent().unwrap_or_else(|| Path::new(".")),
         log_path.file_name().unwrap_or_default(),

@@ -353,6 +353,15 @@ impl Database {
         Ok(map)
     }
 
+    pub fn update_chapter_number(&self, chapter_id: i64, chapter_number: f64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chapters SET chapter_number = ?1 WHERE id = ?2",
+            params![chapter_number, chapter_id],
+        )?;
+        Ok(())
+    }
+
     /// Batch insert or update scanned chapters in a single atomic transaction.
     /// Reduces 1,000 separate disk syncs to 1 single transaction on slow storage.
     pub fn batch_record_chapters(
