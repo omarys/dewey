@@ -14,8 +14,8 @@ use tracing::warn;
 
 use crate::db::{ChapterScanEntry, Database};
 
-static RE_CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:chapter|chap|episode|ep|ch|vol|v|\bc|#)[_\s\.]*([0-9]+(?:\.[0-9]+)?)"#)
+static RE_EXPLICIT_CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:chapter|chap|episode|ep|\bch|\bc|\b#)[_\s\.]*([0-9]+(?:\.[0-9]+)?)"#)
         .expect("invalid regex")
 });
 static RE_BRACKET: LazyLock<Regex> =
@@ -170,36 +170,65 @@ impl LibraryScanner {
         series_dir: &Path,
     ) -> Result<(usize, usize)> {
         let existing_map = db.get_existing_chapters_by_path(series_id)?;
-        let entries = fs::read_dir(series_dir)?;
+        let mut chapter_paths: Vec<PathBuf> = fs::read_dir(series_dir)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| Self::is_chapter_file(p) || (p.is_dir() && !Self::is_special_dir(p)))
+            .collect();
+
+        chapter_paths.sort_by(|a, b| {
+            natord::compare(&a.to_string_lossy(), &b.to_string_lossy())
+        });
+
+        let has_explicit = chapter_paths
+            .iter()
+            .any(|p| Self::parse_explicit_chapter_number(p).is_some());
+
         let mut chapters_found = 0;
         let mut to_insert = Vec::new();
+        let mut last_known_chap = 0.0;
+        let mut bonus_offset = 0.0;
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if Self::is_chapter_file(&path) || (path.is_dir() && !Self::is_special_dir(&path)) {
-                if let Some(chap_num) = Self::parse_chapter_number(&path) {
-                    chapters_found += 1;
-                    let path_str = path.to_string_lossy().to_string();
+        for path in chapter_paths {
+            let explicit_chap = Self::parse_explicit_chapter_number(&path);
+            let chap_num = if let Some(num) = explicit_chap {
+                last_known_chap = num;
+                bonus_offset = 0.0;
+                num
+            } else if !has_explicit {
+                if let Some(fallback_num) = Self::parse_chapter_number(&path) {
+                    last_known_chap = fallback_num;
+                    bonus_offset = 0.0;
+                    fallback_num
+                } else {
+                    bonus_offset += 0.1;
+                    ((last_known_chap + bonus_offset) * 100.0).round() / 100.0
+                }
+            } else {
+                bonus_offset += 0.1;
+                ((last_known_chap + bonus_offset) * 100.0).round() / 100.0
+            };
 
-                    // Diff check: if file is already indexed with page_count, skip opening zip
-                    if let Some(info) = existing_map.get(&path_str) {
-                        if (info.chapter_number - chap_num).abs() > 0.001 {
-                            let _ = db.update_chapter_number(info.id, chap_num);
-                        }
-                        if info.page_count.is_some() {
-                            continue;
-                        }
-                    }
+            chapters_found += 1;
+            let path_str = path.to_string_lossy().to_string();
 
-                    // New or uncounted chapter -> open archive once
-                    let page_count = Self::detect_page_count(&path);
-                    to_insert.push(ChapterScanEntry {
-                        chapter_number: chap_num,
-                        file_path: path_str,
-                        page_count,
-                    });
+            // Diff check: if file is already indexed with page_count, skip opening zip
+            if let Some(info) = existing_map.get(&path_str) {
+                if (info.chapter_number - chap_num).abs() > 0.001 {
+                    let _ = db.update_chapter_number(info.id, chap_num);
+                }
+                if info.page_count.is_some() {
+                    continue;
                 }
             }
+
+            // New or uncounted chapter -> open archive once
+            let page_count = Self::detect_page_count(&path);
+            to_insert.push(ChapterScanEntry {
+                chapter_number: chap_num,
+                file_path: path_str,
+                page_count,
+            });
         }
 
         let new_chapters_added = db.batch_record_chapters(series_id, &to_insert)?;
@@ -308,17 +337,26 @@ impl LibraryScanner {
         })
     }
 
-    /// Robust chapter number parsing using static precompiled regexes
-    pub fn parse_chapter_number(path: &Path) -> Option<f64> {
+    /// Attempts to extract an explicit chapter number (e.g. Chapter 5, Episode 2, Ch. 12, #40)
+    pub fn parse_explicit_chapter_number(path: &Path) -> Option<f64> {
         let file_stem = path.file_stem()?.to_string_lossy();
-
-        // Pattern 1: Look explicitly for "chapter_105" or "chapter 105" or "c105"
-        if let Some(caps) = RE_CHAPTER.captures(&file_stem) {
+        if let Some(caps) = RE_EXPLICIT_CHAPTER.captures(&file_stem) {
             if let Some(m) = caps.get(1) {
                 if let Ok(num) = m.as_str().parse::<f64>() {
                     return Some(num);
                 }
             }
+        }
+        None
+    }
+
+    /// Robust chapter number parsing using static precompiled regexes
+    pub fn parse_chapter_number(path: &Path) -> Option<f64> {
+        let file_stem = path.file_stem()?.to_string_lossy();
+
+        // Pattern 1: Look explicitly for "chapter_105" or "chapter 105" or "ch105" or "episode 1"
+        if let Some(num) = Self::parse_explicit_chapter_number(path) {
+            return Some(num);
         }
 
         // Pattern 2: Bracket prefix index like [0045]
@@ -472,6 +510,14 @@ mod tests {
         assert_eq!(
             LibraryScanner::parse_chapter_number(Path::new("Solo Leveling - c105.cbz")),
             Some(105.0)
+        );
+        assert_eq!(
+            LibraryScanner::parse_explicit_chapter_number(Path::new("[0006]_Vol.1_Bonus_Material.cbz")),
+            None
+        );
+        assert_eq!(
+            LibraryScanner::parse_explicit_chapter_number(Path::new("[0001]_Chapter_1.cbz")),
+            Some(1.0)
         );
     }
 

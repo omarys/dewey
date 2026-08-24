@@ -166,7 +166,7 @@ impl Database {
              FROM chapters c
              LEFT JOIN progress p ON c.id = p.chapter_id
              WHERE c.series_id = ?1
-             ORDER BY c.chapter_number ASC",
+             ORDER BY c.chapter_number ASC, c.file_path ASC",
         )?;
 
         let chapters = stmt
