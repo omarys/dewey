@@ -84,7 +84,8 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config, db: Database, event_tx: UnboundedSender<AppEvent>) -> Result<Self> {
-        let continuum_runner = ContinuumRunner::new(&config.continuum_bin);
+        let continuum_runner = ContinuumRunner::new(&config.continuum_bin)
+            .with_storage_profile(config.storage_profile.as_str());
         let labrador_runner = LabradorRunner::new(&config.labrador_bin);
 
         let mut series_state = ListState::default();
@@ -139,10 +140,17 @@ impl App {
         self.is_scanning = true;
         let db = self.db.clone();
         let lib_dir = self.config.library_dir.clone();
+        let profile = self.config.storage_profile;
+        let max_concurrency = self.config.max_scan_concurrency;
         let event_tx = self.event_tx.clone();
 
-        tokio::task::spawn_blocking(
-            move || match LibraryScanner::scan_directory(&db, &lib_dir) {
+        tokio::task::spawn_blocking(move || {
+            match LibraryScanner::scan_directory_with_profile(
+                &db,
+                &lib_dir,
+                profile,
+                max_concurrency,
+            ) {
                 Ok(summary) => {
                     let _ = event_tx.send(AppEvent::ScanCompleted(summary));
                 }
@@ -152,8 +160,8 @@ impl App {
                         is_error: true,
                     });
                 }
-            },
-        );
+            }
+        });
     }
 
     pub fn on_scan_completed(&mut self, summary: crate::scanner::ScanSummary) {

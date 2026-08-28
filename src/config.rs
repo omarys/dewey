@@ -5,6 +5,30 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageProfile {
+    #[default]
+    Fast,
+    Usb,
+}
+
+impl StorageProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Usb => "usb",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "usb" | "removable" | "slow" | "low-io" | "sd" => Self::Usb,
+            _ => Self::Fast,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Default directory to scan for manga/manhwa chapters and series
@@ -27,6 +51,14 @@ pub struct Config {
 
     /// Seed sample data if database and library are completely empty
     pub seed_sample_data: bool,
+
+    /// Storage optimization profile ('fast' or 'usb')
+    #[serde(default)]
+    pub storage_profile: StorageProfile,
+
+    /// Optional override for library scanner worker thread concurrency
+    #[serde(default)]
+    pub max_scan_concurrency: Option<usize>,
 }
 
 impl Default for Config {
@@ -44,6 +76,8 @@ impl Default for Config {
             labrador_bin: PathBuf::from("labrador"),
             auto_scan_on_startup: true,
             seed_sample_data: false,
+            storage_profile: StorageProfile::Fast,
+            max_scan_concurrency: None,
         }
     }
 }
@@ -65,6 +99,19 @@ impl Config {
         }
 
         PathBuf::from(format!("{}/Documents/Books", home))
+    }
+
+    pub fn auto_detect_storage_profile(path: &Path) -> StorageProfile {
+        let p_str = path.to_string_lossy().to_lowercase();
+        if p_str.starts_with("/media/")
+            || p_str.starts_with("/run/media/")
+            || p_str.starts_with("/mnt/")
+            || p_str.contains("/usb")
+        {
+            StorageProfile::Usb
+        } else {
+            StorageProfile::Fast
+        }
     }
 
     pub fn load_or_create(config_path: Option<&Path>) -> Result<Self> {
@@ -163,5 +210,30 @@ mod tests {
             .contains(".local/state/dewey/dewey.log"));
         assert!(cfg.db_path.is_absolute());
         assert!(cfg.log_file.is_absolute());
+        assert_eq!(cfg.storage_profile, StorageProfile::Fast);
+    }
+
+    #[test]
+    fn test_storage_profile_parsing_and_detection() {
+        assert_eq!(StorageProfile::from_str_loose("usb"), StorageProfile::Usb);
+        assert_eq!(StorageProfile::from_str_loose("slow"), StorageProfile::Usb);
+        assert_eq!(StorageProfile::from_str_loose("fast"), StorageProfile::Fast);
+
+        assert_eq!(
+            Config::auto_detect_storage_profile(Path::new("/media/user/DRIVE/Manga")),
+            StorageProfile::Usb
+        );
+        assert_eq!(
+            Config::auto_detect_storage_profile(Path::new("/run/media/user/DRIVE")),
+            StorageProfile::Usb
+        );
+        assert_eq!(
+            Config::auto_detect_storage_profile(Path::new("/mnt/usb_disk")),
+            StorageProfile::Usb
+        );
+        assert_eq!(
+            Config::auto_detect_storage_profile(Path::new("/home/user/Documents/Manga")),
+            StorageProfile::Fast
+        );
     }
 }

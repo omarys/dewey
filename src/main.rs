@@ -57,6 +57,18 @@ struct Cli {
     /// Reinitialize the SQLite database from scratch (deletes all data)
     #[arg(long)]
     init: bool,
+
+    /// Storage optimization profile ('fast' for internal NVMe/SSD, 'usb' for flash thumb drives / slow media)
+    #[arg(long, value_name = "PROFILE")]
+    storage_profile: Option<String>,
+
+    /// Quick flag to enable USB/slow-storage optimization profile
+    #[arg(short = 'u', long)]
+    usb: bool,
+
+    /// Override max concurrent worker threads for library scanning
+    #[arg(long, value_name = "N")]
+    scan_concurrency: Option<usize>,
 }
 
 fn init_logging(log_path: &Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -116,6 +128,17 @@ async fn main() -> Result<()> {
     if let Some(seed) = cli.seed {
         config.seed_sample_data = seed;
     }
+    if cli.usb {
+        config.storage_profile = config::StorageProfile::Usb;
+    } else if let Some(prof_str) = &cli.storage_profile {
+        config.storage_profile = config::StorageProfile::from_str_loose(prof_str);
+    } else if config.storage_profile == config::StorageProfile::Fast {
+        // Auto-detect storage medium from library location
+        config.storage_profile = Config::auto_detect_storage_profile(&config.library_dir);
+    }
+    if let Some(concurrency) = cli.scan_concurrency {
+        config.max_scan_concurrency = Some(concurrency);
+    }
 
     let _guard = init_logging(&config.log_file).context("Failed to initialize file logger")?;
 
@@ -123,6 +146,7 @@ async fn main() -> Result<()> {
     info!(
         db = ?config.db_path,
         library = ?config.library_dir,
+        profile = config.storage_profile.as_str(),
         "Connecting to SQLite database"
     );
 
@@ -148,7 +172,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let db = Database::open(&config.db_path)?;
+    let db = Database::open_with_profile(&config.db_path, config.storage_profile)?;
     if config.seed_sample_data {
         db.seed_sample_data_if_empty()?;
     }
@@ -175,13 +199,15 @@ async fn main() -> Result<()> {
         };
 
         println!(
-            "📖 Opening {:?} in Continuum ({} mode) at page {}...",
+            "📖 Opening {:?} in Continuum ({} mode, {} profile) at page {}...",
             abs_path.file_name().unwrap_or_default(),
             series_mode,
+            config.storage_profile.as_str(),
             last_page
         );
 
-        let runner = ContinuumRunner::new(&config.continuum_bin);
+        let runner = ContinuumRunner::new(&config.continuum_bin)
+            .with_storage_profile(config.storage_profile.as_str());
         let result = runner.spawn_and_wait(&abs_path, last_page, Some(&series_mode))?;
 
         if let Some(new_mode) = &result.mode {

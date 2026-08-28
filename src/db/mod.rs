@@ -34,6 +34,10 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_profile(path, crate::config::StorageProfile::Fast)
+    }
+
+    pub fn open_with_profile(path: &Path, profile: crate::config::StorageProfile) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create DB directory: {:?}", parent))?;
@@ -42,14 +46,25 @@ impl Database {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite database at {:?}", path))?;
 
-        // Configure high-performance SQLite pragmas for instant startup and flash storage
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA cache_size = -64000;
-             PRAGMA mmap_size = 268435456;
-             PRAGMA temp_store = MEMORY;",
-        )?;
+        // Configure high-performance SQLite pragmas tailored to the storage medium
+        let pragmas = match profile {
+            crate::config::StorageProfile::Fast => {
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA cache_size = -64000;
+                 PRAGMA mmap_size = 268435456;
+                 PRAGMA temp_store = MEMORY;"
+            }
+            crate::config::StorageProfile::Usb => {
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA cache_size = -32000;
+                 PRAGMA mmap_size = 0;
+                 PRAGMA temp_store = MEMORY;"
+            }
+        };
+
+        conn.execute_batch(pragmas)?;
 
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -942,5 +957,23 @@ mod tests {
         let map = db.get_existing_chapters_by_path(series_id).unwrap();
         assert_eq!(map.len(), 2);
         assert_eq!(map.get("/manga/ch01.cbz").unwrap().page_count, Some(45));
+    }
+
+    #[test]
+    fn test_database_open_with_profile() {
+        let dir = std::env::temp_dir();
+        let path_fast = dir.join(format!("dewey_test_fast_{}.db", std::process::id()));
+        let path_usb = dir.join(format!("dewey_test_usb_{}.db", std::process::id()));
+
+        let db_fast =
+            Database::open_with_profile(&path_fast, crate::config::StorageProfile::Fast).unwrap();
+        let db_usb =
+            Database::open_with_profile(&path_usb, crate::config::StorageProfile::Usb).unwrap();
+
+        assert!(path_fast.exists());
+        assert!(path_usb.exists());
+
+        let _ = Database::reset(&path_fast);
+        let _ = Database::reset(&path_usb);
     }
 }

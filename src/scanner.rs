@@ -43,13 +43,33 @@ impl LibraryScanner {
     /// page-count reads (the slow part) overlap; SQLite writes stay serialized
     /// behind the shared connection mutex.
     pub fn scan_directory(db: &Database, library_dir: &Path) -> Result<ScanSummary> {
+        Self::scan_directory_with_profile(
+            db,
+            library_dir,
+            crate::config::StorageProfile::Fast,
+            None,
+        )
+    }
+
+    /// Scans the designated library directory and synchronizes it with SQLite.
+    /// Worker pool concurrency is scaled based on the storage profile (fast vs usb).
+    pub fn scan_directory_with_profile(
+        db: &Database,
+        library_dir: &Path,
+        profile: crate::config::StorageProfile,
+        max_concurrency: Option<usize>,
+    ) -> Result<ScanSummary> {
         if !library_dir.exists() {
             fs::create_dir_all(library_dir)?;
             info!(path = ?library_dir, "Created empty library directory");
             return Ok(ScanSummary::default());
         }
 
-        info!(path = ?library_dir, "Scanning library directory for manga entries");
+        info!(
+            path = ?library_dir,
+            profile = profile.as_str(),
+            "Scanning library directory for manga entries"
+        );
 
         // Collect series directories before fanning out work.
         let series_dirs: Vec<PathBuf> = fs::read_dir(library_dir)?
@@ -62,9 +82,16 @@ impl LibraryScanner {
             return Ok(ScanSummary::default());
         }
 
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        let default_workers = match profile {
+            crate::config::StorageProfile::Fast => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            crate::config::StorageProfile::Usb => 2,
+        };
+
+        let workers = max_concurrency
+            .unwrap_or(default_workers)
+            .max(1)
             .min(series_dirs.len());
         let next = AtomicUsize::new(0);
 
@@ -124,8 +151,11 @@ impl LibraryScanner {
         let mut summary = ScanSummary::default();
         summary.series_found += 1;
 
+        // Read series directory entries once in a single pass
+        let entries: Vec<PathBuf> = fs::read_dir(path)?.flatten().map(|e| e.path()).collect();
+
         // 1. Read series.json if present for richer metadata
-        let series_meta = Self::read_series_json(path);
+        let series_meta = Self::read_series_json_from_entries(&entries);
 
         let folder_name = path
             .file_name()
@@ -137,7 +167,7 @@ impl LibraryScanner {
             .and_then(|m| m.name.clone())
             .unwrap_or(folder_name);
 
-        let cover_path = Self::find_cover_image(path);
+        let cover_path = Self::find_cover_image_from_entries(&entries);
         let series_id = db.insert_or_get_series_with_cover(
             &series_title,
             cover_path.as_deref().and_then(|p| p.to_str()),
@@ -156,29 +186,39 @@ impl LibraryScanner {
             }
         }
 
-        // 2. Scan chapter files inside the series directory using fast diff
-        let (ch_count, new_count) = Self::scan_series_directory(db, series_id, path)?;
+        // 2. Scan chapter files inside the series directory using the already read entries
+        let (ch_count, new_count) = Self::scan_series_entries(db, series_id, &entries)?;
         summary.chapters_found += ch_count;
         summary.new_chapters_added += new_count;
 
         Ok(summary)
     }
 
-    fn scan_series_directory(
+    pub fn scan_series_directory(
         db: &Database,
         series_id: i64,
         series_dir: &Path,
     ) -> Result<(usize, usize)> {
-        let existing_map = db.get_existing_chapters_by_path(series_id)?;
-        let mut chapter_paths: Vec<PathBuf> = fs::read_dir(series_dir)?
+        let entries: Vec<PathBuf> = fs::read_dir(series_dir)?
             .flatten()
             .map(|e| e.path())
+            .collect();
+        Self::scan_series_entries(db, series_id, &entries)
+    }
+
+    fn scan_series_entries(
+        db: &Database,
+        series_id: i64,
+        entries: &[PathBuf],
+    ) -> Result<(usize, usize)> {
+        let existing_map = db.get_existing_chapters_by_path(series_id)?;
+        let mut chapter_paths: Vec<PathBuf> = entries
+            .iter()
             .filter(|p| Self::is_chapter_file(p) || (p.is_dir() && !Self::is_special_dir(p)))
+            .cloned()
             .collect();
 
-        chapter_paths.sort_by(|a, b| {
-            natord::compare(&a.to_string_lossy(), &b.to_string_lossy())
-        });
+        chapter_paths.sort_by(|a, b| natord::compare(&a.to_string_lossy(), &b.to_string_lossy()));
 
         let has_explicit = chapter_paths
             .iter()
@@ -275,6 +315,15 @@ impl LibraryScanner {
     }
 
     pub fn find_cover_image(series_dir: &Path) -> Option<PathBuf> {
+        let entries: Vec<PathBuf> = fs::read_dir(series_dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        Self::find_cover_image_from_entries(&entries)
+    }
+
+    pub fn find_cover_image_from_entries(entries: &[PathBuf]) -> Option<PathBuf> {
         let candidates = [
             "cover.jpg",
             "cover.png",
@@ -287,9 +336,13 @@ impl LibraryScanner {
         ];
 
         for name in &candidates {
-            let p = series_dir.join(name);
-            if p.exists() {
-                return Some(p);
+            if let Some(p) = entries.iter().find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+            }) {
+                return Some(p.clone());
             }
         }
 
@@ -297,12 +350,23 @@ impl LibraryScanner {
     }
 
     fn read_series_json(series_dir: &Path) -> Option<SeriesMetadataParsed> {
-        let json_path = series_dir.join("series.json");
-        if !json_path.exists() {
-            return None;
-        }
+        let entries: Vec<PathBuf> = fs::read_dir(series_dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        Self::read_series_json_from_entries(&entries)
+    }
 
-        let content = fs::read_to_string(&json_path).ok()?;
+    fn read_series_json_from_entries(entries: &[PathBuf]) -> Option<SeriesMetadataParsed> {
+        let json_path = entries.iter().find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case("series.json"))
+                .unwrap_or(false)
+        })?;
+
+        let content = fs::read_to_string(json_path).ok()?;
         let parsed: Value = serde_json::from_str(&content).ok()?;
 
         let meta_obj = parsed.get("metadata").unwrap_or(&parsed);
@@ -512,7 +576,9 @@ mod tests {
             Some(105.0)
         );
         assert_eq!(
-            LibraryScanner::parse_explicit_chapter_number(Path::new("[0006]_Vol.1_Bonus_Material.cbz")),
+            LibraryScanner::parse_explicit_chapter_number(Path::new(
+                "[0006]_Vol.1_Bonus_Material.cbz"
+            )),
             None
         );
         assert_eq!(
@@ -583,5 +649,50 @@ mod tests {
         assert_eq!(series[0].stats.downloaded_chapters, 3);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_usb_scan_profile_with_concurrency_limit() {
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let root = std::env::temp_dir().join(format!("dewey_usb_scan_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let dir = root.join("UsbSeries");
+        std::fs::create_dir_all(&dir).unwrap();
+        let zp = dir.join("c001.cbz");
+        let file = std::fs::File::create(&zp).unwrap();
+        let mut z = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default();
+        z.start_file("1.jpg", opts).unwrap();
+        z.write_all(b"x").unwrap();
+        z.finish().unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let summary = LibraryScanner::scan_directory_with_profile(
+            &db,
+            &root,
+            crate::config::StorageProfile::Usb,
+            Some(1),
+        )
+        .unwrap();
+
+        assert_eq!(summary.series_found, 1);
+        assert_eq!(summary.chapters_found, 1);
+        assert_eq!(summary.new_chapters_added, 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_find_cover_image_from_entries() {
+        let entries = vec![
+            PathBuf::from("/manga/Solo/ch01.cbz"),
+            PathBuf::from("/manga/Solo/folder.jpg"),
+            PathBuf::from("/manga/Solo/series.json"),
+        ];
+        let cover = LibraryScanner::find_cover_image_from_entries(&entries);
+        assert_eq!(cover, Some(PathBuf::from("/manga/Solo/folder.jpg")));
     }
 }

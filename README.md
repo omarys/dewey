@@ -157,6 +157,10 @@ dewey
 # Launch with custom library directory
 dewey --library-dir ~/Documents/Manga
 
+# Launch with USB / removable media optimization profile
+dewey -u --library-dir /media/user/DRIVE/Manga
+# or: dewey --storage-profile usb --library-dir /media/user/DRIVE/Manga
+
 # Launch with custom config file
 dewey -c /path/to/dewey.toml
 

@@ -49,6 +49,7 @@ impl ContinuumExitPayload {
 
 pub struct ContinuumRunner {
     binary_path: PathBuf,
+    storage_profile: Option<String>,
 }
 
 impl Default for ContinuumRunner {
@@ -61,10 +62,16 @@ impl ContinuumRunner {
     pub fn new(binary_path: impl Into<PathBuf>) -> Self {
         Self {
             binary_path: binary_path.into(),
+            storage_profile: None,
         }
     }
 
-    /// Builds the Command configured with clean --file, --page, and --mode flags.
+    pub fn with_storage_profile(mut self, profile: &str) -> Self {
+        self.storage_profile = Some(profile.to_string());
+        self
+    }
+
+    /// Builds the Command configured with clean --file, --page, --mode, and --storage-profile flags.
     pub fn build_command(&self, file_path: &Path, last_page: i64, mode: Option<&str>) -> Command {
         let mut cmd = Command::new(&self.binary_path);
         cmd.arg("--file")
@@ -72,9 +79,11 @@ impl ContinuumRunner {
             .arg("--page")
             .arg(last_page.to_string())
             .arg("--mode")
-            .arg(mode.unwrap_or("webtoon"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .arg(mode.unwrap_or("webtoon"));
+        if let Some(prof) = &self.storage_profile {
+            cmd.arg("--storage-profile").arg(prof);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         cmd
     }
 
@@ -185,6 +194,32 @@ mod tests {
         assert_eq!(
             args,
             vec!["--file", "/tmp/test.cbz", "--page", "42", "--mode", "manga"]
+        );
+    }
+
+    #[test]
+    fn test_build_command_with_storage_profile() {
+        let runner = ContinuumRunner::new("continuum").with_storage_profile("usb");
+        let test_path = Path::new("/tmp/test.cbz");
+        let cmd = runner.build_command(test_path, 10, Some("webtoon"));
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "--file",
+                "/tmp/test.cbz",
+                "--page",
+                "10",
+                "--mode",
+                "webtoon",
+                "--storage-profile",
+                "usb"
+            ]
         );
     }
 
