@@ -40,9 +40,7 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ),
         Span::styled(
             format!("  {} Series", total_series),
-            Style::default()
-                .fg(theme.fg)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  •  {} Downloaded", total_downloaded),
@@ -89,7 +87,10 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
     let total_filtered = app.filtered_indices.len();
 
     let title_text = if app.input_mode == InputMode::SearchInput {
-        format!(" 🔍 Search: \"{}\"_ [ESC: Cancel, ↵: Done] ", app.search_query)
+        format!(
+            " 🔍 Search: \"{}\"_ [ESC: Cancel, ↵: Done] ",
+            app.search_query
+        )
     } else if !app.search_query.is_empty() || app.filter_mode != FilterMode::All {
         let mut filter_desc = Vec::new();
         if !app.search_query.is_empty() {

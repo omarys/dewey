@@ -1,6 +1,6 @@
 # Spec 0001: Interactive Library Search & Multi-Criteria Filtering
 
-**Status:** Ready for Implementation  
+**Status:** Ready for Implementation
 **Triage Role:** `ready-for-agent`
 
 ## Problem Statement
