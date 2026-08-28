@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{ActivePane, App, AppAction};
+use crate::app::{ActivePane, App, AppAction, FilterMode, InputMode};
 use crate::ui::theme::Theme;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -32,20 +32,17 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let mut header_spans = vec![
         Span::styled(
-            " 📚 DEWEY ",
+            " Dewey ",
             Style::default()
-                .fg(Color::Black)
+                .fg(theme.highlight_fg)
                 .bg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
         Span::styled(
-            "Library Manager",
-            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  •  {} Series", total_series),
-            Style::default().fg(theme.muted_fg),
+            format!("  {} Series", total_series),
+            Style::default()
+                .fg(theme.fg)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  •  {} Downloaded", total_downloaded),
@@ -88,74 +85,117 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
         theme.block_title_normal()
     };
 
-    let items: Vec<ListItem> = app
-        .series_list
-        .iter()
-        .enumerate()
-        .map(|(idx, s)| {
-            let is_selected = idx == app.selected_series_idx;
-            let status_badge = match s.series.status.as_deref() {
-                Some("Completed") => Span::styled(" [CMPL] ", theme.success_badge()),
-                Some("Ongoing") | Some("Continuing") => {
-                    Span::styled(" [ONG] ", theme.warning_badge())
-                }
-                _ => Span::raw(" "),
-            };
+    let total_all = app.series_list.len();
+    let total_filtered = app.filtered_indices.len();
 
-            let read_indicator = if let Some(last_ch) = s.stats.latest_read_chapter {
-                Span::styled(
-                    format!("Ch.{:.0} ", last_ch),
-                    Style::default().fg(theme.accent),
-                )
-            } else {
-                Span::styled("Unread ", Style::default().fg(theme.muted_fg))
-            };
+    let title_text = if app.input_mode == InputMode::SearchInput {
+        format!(" 🔍 Search: \"{}\"_ [ESC: Cancel, ↵: Done] ", app.search_query)
+    } else if !app.search_query.is_empty() || app.filter_mode != FilterMode::All {
+        let mut filter_desc = Vec::new();
+        if !app.search_query.is_empty() {
+            filter_desc.push(format!("🔍 \"{}\"", app.search_query));
+        }
+        if app.filter_mode != FilterMode::All {
+            filter_desc.push(format!("Filter: {}", app.filter_mode.label()));
+        }
+        format!(
+            " 1. Series ({}/{}) [{}] ",
+            total_filtered,
+            total_all,
+            filter_desc.join(" · ")
+        )
+    } else {
+        format!(" 1. Series Library ({}) ", total_all)
+    };
 
-            let count_info = format!("{}/{}", s.stats.downloaded_chapters, s.stats.total_chapters);
+    let title_span = if app.input_mode == InputMode::SearchInput {
+        Span::styled(
+            title_text,
+            Style::default()
+                .fg(theme.highlight_fg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(title_text, title_style)
+    };
 
-            let url_indicator = if s.series.fetch_url.is_some() {
-                Span::styled(" 🔗", Style::default().fg(theme.accent_alt))
-            } else {
-                Span::raw("")
-            };
+    let items: Vec<ListItem> = if app.filtered_indices.is_empty() {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "   No matching series found",
+            Style::default().fg(theme.muted_fg),
+        )]))]
+    } else {
+        app.filtered_indices
+            .iter()
+            .enumerate()
+            .map(|(filtered_pos, &real_idx)| {
+                let s = &app.series_list[real_idx];
+                let is_selected = filtered_pos == app.selected_series_idx;
+                let status_badge = match s.series.status.as_deref() {
+                    Some("Completed") => Span::styled(" [CMPL] ", theme.success_badge()),
+                    Some("Ongoing") | Some("Continuing") => {
+                        Span::styled(" [ONG] ", theme.warning_badge())
+                    }
+                    _ => Span::raw(" "),
+                };
 
-            let line = Line::from(vec![
-                Span::styled(
-                    if is_selected { " ▶ " } else { "   " },
-                    if is_selected {
-                        theme.title()
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::styled(
-                    format!("{:<20}", s.series.title),
-                    if is_selected {
-                        Style::default()
-                            .fg(theme.highlight_fg)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.fg)
-                    },
-                ),
-                read_indicator,
-                Span::styled(
-                    format!("{:>7}", count_info),
-                    Style::default().fg(theme.muted_fg),
-                ),
-                url_indicator,
-                status_badge,
-            ]);
+                let read_indicator = if let Some(last_ch) = s.stats.latest_read_chapter {
+                    Span::styled(
+                        format!("Ch.{:.0} ", last_ch),
+                        Style::default().fg(theme.accent),
+                    )
+                } else {
+                    Span::styled("Unread ", Style::default().fg(theme.muted_fg))
+                };
 
-            let item_style = if is_selected {
-                theme.selected_item()
-            } else {
-                theme.normal_item()
-            };
+                let count_info =
+                    format!("{}/{}", s.stats.downloaded_chapters, s.stats.total_chapters);
 
-            ListItem::new(line).style(item_style)
-        })
-        .collect();
+                let url_indicator = if s.series.fetch_url.is_some() {
+                    Span::styled(" 🔗", Style::default().fg(theme.accent_alt))
+                } else {
+                    Span::raw("")
+                };
+
+                let line = Line::from(vec![
+                    Span::styled(
+                        if is_selected { " ▶ " } else { "   " },
+                        if is_selected {
+                            theme.title()
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                    Span::styled(
+                        format!("{:<20}", s.series.title),
+                        if is_selected {
+                            Style::default()
+                                .fg(theme.highlight_fg)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.fg)
+                        },
+                    ),
+                    read_indicator,
+                    Span::styled(
+                        format!("{:>7}", count_info),
+                        Style::default().fg(theme.muted_fg),
+                    ),
+                    url_indicator,
+                    status_badge,
+                ]);
+
+                let item_style = if is_selected {
+                    theme.selected_item()
+                } else {
+                    theme.normal_item()
+                };
+
+                ListItem::new(line).style(item_style)
+            })
+            .collect()
+    };
 
     let list = List::new(items)
         .block(
@@ -163,7 +203,7 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(border_style)
-                .title(Span::styled(" 1. Series Library ", title_style)),
+                .title(title_span),
         )
         .highlight_style(theme.selected_item());
 
@@ -559,12 +599,14 @@ pub fn render_action_bar(
             ("📖 Read", AppAction::Open),
             ("⬇ Fetch", AppAction::Fetch),
             ("⏭ Next", AppAction::FetchNext),
-            ("🔄 Mode", AppAction::Mode),
+            ("🔍 Find", AppAction::Search),
+            ("⚡ Filter", AppAction::Filter),
         ];
 
         let row2_actions = [
+            ("🔄 Mode", AppAction::Mode),
             ("✓ Mark", AppAction::MarkRead),
-            ("🔍 Scan", AppAction::Scan),
+            ("📁 Scan", AppAction::Scan),
             ("🗑 Del", AppAction::Delete),
             ("❌ Quit", AppAction::Quit),
         ];
@@ -602,9 +644,11 @@ pub fn render_action_bar(
             ("📖 Read", AppAction::Open),
             ("⬇ Fetch", AppAction::Fetch),
             ("⏭ Next", AppAction::FetchNext),
+            ("🔍 Find", AppAction::Search),
+            ("⚡ Filter", AppAction::Filter),
             ("🔄 Mode", AppAction::Mode),
             ("✓ Mark", AppAction::MarkRead),
-            ("🔍 Scan", AppAction::Scan),
+            ("📁 Scan", AppAction::Scan),
             ("🗑 Del", AppAction::Delete),
             ("❌ Quit", AppAction::Quit),
         ];
@@ -643,6 +687,8 @@ fn action_key(action: AppAction) -> &'static str {
         AppAction::Reset => "u",
         AppAction::Delete => "x",
         AppAction::SwitchPane => "Tab",
+        AppAction::Search => "/",
+        AppAction::Filter => "f",
         AppAction::Quit => "q",
     }
 }
@@ -650,33 +696,43 @@ fn action_key(action: AppAction) -> &'static str {
 pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut spans = vec![
         Span::styled(
+            " [/] ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Search  ", Style::default().fg(theme.fg)),
+        Span::styled(
+            " [f] ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("Filter: {}  ", app.filter_mode.label()),
+            Style::default().fg(theme.fg),
+        ),
+        Span::styled(
             " [Enter] ",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Read/Fetch  ", Style::default().fg(theme.fg)),
+        Span::styled("Read  ", Style::default().fg(theme.fg)),
         Span::styled(
             " [d] ",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Download  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [D] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Fetch Next  ", Style::default().fg(theme.fg)),
+        Span::styled("Fetch  ", Style::default().fg(theme.fg)),
         Span::styled(
             " [s] ",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Scan Library  ", Style::default().fg(theme.fg)),
+        Span::styled("Scan  ", Style::default().fg(theme.fg)),
         Span::styled(
             " [m] ",
             Style::default()
@@ -697,14 +753,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Switch Pane  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [r] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Reload  ", Style::default().fg(theme.fg)),
+        Span::styled("Pane  ", Style::default().fg(theme.fg)),
         Span::styled(
             " [?] ",
             Style::default()
@@ -742,6 +791,20 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
     f.render_widget(Clear, area);
 
     let help_text = vec![
+        Line::from(vec![
+            Span::styled(
+                "  /                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Search series library (live fuzzy match)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  f / F                 ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Cycle status filter (All → Unread → Ongoing → Completed)"),
+        ]),
         Line::from(vec![
             Span::styled(
                 "  j / Down              ",

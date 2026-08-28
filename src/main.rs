@@ -276,6 +276,28 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
+                    if app.input_mode == app::InputMode::SearchInput {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                app.should_quit = true;
+                            }
+                            (KeyCode::Esc, _) => {
+                                app.exit_search_mode(true);
+                            }
+                            (KeyCode::Enter, _) | (KeyCode::Down, _) => {
+                                app.exit_search_mode(false);
+                            }
+                            (KeyCode::Backspace, _) => {
+                                app.search_pop_char();
+                            }
+                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                app.search_push_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     match (key.code, key.modifiers) {
                         (KeyCode::Char('c'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('q'), KeyModifiers::NONE) => {
@@ -283,6 +305,13 @@ async fn main() -> Result<()> {
                         }
                         (KeyCode::Char('?'), _) => {
                             app.show_help_modal = true;
+                        }
+                        (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                            app.enter_search_mode();
+                        }
+                        (KeyCode::Char('f'), KeyModifiers::NONE)
+                        | (KeyCode::Char('F'), _) => {
+                            app.toggle_filter_mode();
                         }
                         (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                             app.next_item();
@@ -341,7 +370,13 @@ async fn main() -> Result<()> {
                             app.request_delete_selected();
                         }
                         (KeyCode::Esc, _) => {
-                            app.pending_delete_id = None;
+                            if !app.search_query.is_empty()
+                                || app.filter_mode != app::FilterMode::All
+                            {
+                                app.clear_search_and_filters();
+                            } else {
+                                app.pending_delete_id = None;
+                            }
                         }
                         (KeyCode::Char('r'), KeyModifiers::NONE) => {
                             let _ = app.reload_series();
@@ -417,6 +452,12 @@ async fn main() -> Result<()> {
                                     }
                                     AppAction::FetchNext => {
                                         app.download_next_unread_chapter();
+                                    }
+                                    AppAction::Search => {
+                                        app.enter_search_mode();
+                                    }
+                                    AppAction::Filter => {
+                                        app.toggle_filter_mode();
                                     }
                                     AppAction::Mode => {
                                         if let Err(err) = app.toggle_reading_mode_selected() {

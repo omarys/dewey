@@ -21,6 +21,42 @@ pub enum ActivePane {
     ActiveDownloads,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    #[default]
+    Normal,
+    SearchInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterMode {
+    #[default]
+    All,
+    Unread,
+    Ongoing,
+    Completed,
+}
+
+impl FilterMode {
+    pub fn next(self) -> Self {
+        match self {
+            FilterMode::All => FilterMode::Unread,
+            FilterMode::Unread => FilterMode::Ongoing,
+            FilterMode::Ongoing => FilterMode::Completed,
+            FilterMode::Completed => FilterMode::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FilterMode::All => "All",
+            FilterMode::Unread => "Unread",
+            FilterMode::Ongoing => "Ongoing",
+            FilterMode::Completed => "Completed",
+        }
+    }
+}
+
 /// One-shot actions exposed as tappable buttons in the footer action bar
 /// (touchscreen-friendly mirror of the keyboard shortcuts).
 #[allow(dead_code)]
@@ -35,6 +71,8 @@ pub enum AppAction {
     Reset,
     Delete,
     SwitchPane,
+    Search,
+    Filter,
     Quit,
 }
 
@@ -60,6 +98,11 @@ pub struct App {
     pub chapters_list: Vec<ChapterWithProgress>,
     pub selected_chapter_idx: usize,
     pub chapters_state: TableState,
+
+    pub input_mode: InputMode,
+    pub search_query: String,
+    pub filter_mode: FilterMode,
+    pub filtered_indices: Vec<usize>,
 
     pub active_pane: ActivePane,
     pub download_jobs: Vec<DownloadJob>,
@@ -104,6 +147,10 @@ impl App {
             chapters_list: Vec::new(),
             selected_chapter_idx: 0,
             chapters_state,
+            input_mode: InputMode::Normal,
+            search_query: String::new(),
+            filter_mode: FilterMode::All,
+            filtered_indices: Vec::new(),
             active_pane: ActivePane::SeriesList,
             download_jobs: Vec::new(),
             tick_count: 0,
@@ -182,15 +229,119 @@ impl App {
 
     pub fn reload_series(&mut self) -> Result<()> {
         self.series_list = self.db.get_all_series()?;
-        if self.selected_series_idx >= self.series_list.len() && !self.series_list.is_empty() {
-            self.selected_series_idx = self.series_list.len() - 1;
-        }
-        if self.series_list.is_empty() {
+        self.apply_filter();
+        Ok(())
+    }
+
+    pub fn apply_filter(&mut self) {
+        let query = self.search_query.trim().to_lowercase();
+        let query_tokens: Vec<&str> = query.split_whitespace().collect();
+
+        self.filtered_indices = self
+            .series_list
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                // 1. Status Filter
+                let matches_status = match self.filter_mode {
+                    FilterMode::All => true,
+                    FilterMode::Unread => {
+                        s.stats.completed_chapters < s.stats.total_chapters
+                            || s.stats.total_chapters == 0
+                    }
+                    FilterMode::Ongoing => s
+                        .series
+                        .status
+                        .as_deref()
+                        .map(|st| {
+                            st.eq_ignore_ascii_case("ongoing")
+                                || st.eq_ignore_ascii_case("continuing")
+                        })
+                        .unwrap_or(false),
+                    FilterMode::Completed => s
+                        .series
+                        .status
+                        .as_deref()
+                        .map(|st| st.eq_ignore_ascii_case("completed"))
+                        .unwrap_or(false),
+                };
+
+                if !matches_status {
+                    return false;
+                }
+
+                // 2. Search Query Tokens
+                if query_tokens.is_empty() {
+                    return true;
+                }
+
+                let title = s.series.title.to_lowercase();
+                let sort_title = s.series.sort_title.as_deref().unwrap_or("").to_lowercase();
+                let meta = s
+                    .series
+                    .metadata_json
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase();
+
+                query_tokens.iter().all(|&token| {
+                    title.contains(token) || sort_title.contains(token) || meta.contains(token)
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if self.filtered_indices.is_empty() {
+            self.selected_series_idx = 0;
             self.series_state.select(None);
         } else {
+            if self.selected_series_idx >= self.filtered_indices.len() {
+                self.selected_series_idx = self.filtered_indices.len() - 1;
+            }
             self.series_state.select(Some(self.selected_series_idx));
         }
-        Ok(())
+
+        let _ = self.reload_chapters();
+    }
+
+    pub fn enter_search_mode(&mut self) {
+        self.input_mode = InputMode::SearchInput;
+        self.active_pane = ActivePane::SeriesList;
+    }
+
+    pub fn exit_search_mode(&mut self, clear: bool) {
+        self.input_mode = InputMode::Normal;
+        if clear {
+            self.search_query.clear();
+            self.apply_filter();
+        }
+    }
+
+    pub fn search_push_char(&mut self, c: char) {
+        self.search_query.push(c);
+        self.apply_filter();
+    }
+
+    pub fn search_pop_char(&mut self) {
+        self.search_query.pop();
+        self.apply_filter();
+    }
+
+    pub fn toggle_filter_mode(&mut self) {
+        self.filter_mode = self.filter_mode.next();
+        self.apply_filter();
+        self.set_toast(format!("Filter: {}", self.filter_mode.label()), false);
+    }
+
+    pub fn clear_search_and_filters(&mut self) {
+        let had_filters = !self.search_query.is_empty() || self.filter_mode != FilterMode::All;
+        self.search_query.clear();
+        self.filter_mode = FilterMode::All;
+        self.input_mode = InputMode::Normal;
+        self.apply_filter();
+        if had_filters {
+            self.set_toast("Filters cleared", false);
+        }
     }
 
     pub fn reload_chapters(&mut self) -> Result<()> {
@@ -215,17 +366,19 @@ impl App {
     }
 
     pub fn current_series(&self) -> Option<&SeriesWithStats> {
-        self.series_list.get(self.selected_series_idx)
+        self.filtered_indices
+            .get(self.selected_series_idx)
+            .and_then(|&idx| self.series_list.get(idx))
     }
 
     pub fn current_chapter(&self) -> Option<&ChapterWithProgress> {
         self.chapters_list.get(self.selected_chapter_idx)
     }
 
-    /// Selects the series at `idx` (tap). Focuses the series pane, reloads the
-    /// chapter list for it, and cancels any pending delete confirmation.
+    /// Selects the series at `idx` in filtered view (tap). Focuses the series pane,
+    /// reloads the chapter list for it, and cancels any pending delete confirmation.
     pub fn select_series_index(&mut self, idx: usize) {
-        if idx >= self.series_list.len() {
+        if idx >= self.filtered_indices.len() {
             return;
         }
         self.active_pane = ActivePane::SeriesList;
@@ -274,9 +427,9 @@ impl App {
         self.pending_delete_id = None;
         match self.active_pane {
             ActivePane::SeriesList => {
-                if !self.series_list.is_empty() {
+                if !self.filtered_indices.is_empty() {
                     self.selected_series_idx =
-                        (self.selected_series_idx + 1) % self.series_list.len();
+                        (self.selected_series_idx + 1) % self.filtered_indices.len();
                     self.series_state.select(Some(self.selected_series_idx));
                     self.selected_chapter_idx = 0;
                     let _ = self.reload_chapters();
@@ -308,8 +461,8 @@ impl App {
         self.pending_delete_id = None;
         match self.active_pane {
             ActivePane::SeriesList => {
-                if !self.series_list.is_empty() {
-                    self.select_series_index(self.series_list.len() - 1);
+                if !self.filtered_indices.is_empty() {
+                    self.select_series_index(self.filtered_indices.len() - 1);
                 }
             }
             ActivePane::ChaptersList => {
@@ -325,9 +478,9 @@ impl App {
         self.pending_delete_id = None;
         match self.active_pane {
             ActivePane::SeriesList => {
-                if !self.series_list.is_empty() {
+                if !self.filtered_indices.is_empty() {
                     if self.selected_series_idx == 0 {
-                        self.selected_series_idx = self.series_list.len() - 1;
+                        self.selected_series_idx = self.filtered_indices.len() - 1;
                     } else {
                         self.selected_series_idx -= 1;
                     }
@@ -870,5 +1023,75 @@ mod tests {
             app.current_series().unwrap().series.reading_mode(),
             "webtoon"
         );
+    }
+
+    #[test]
+    fn test_search_query_filtering() {
+        let mut app = test_app();
+        let total = app.series_list.len();
+        assert!(total >= 2);
+        assert_eq!(app.filtered_indices.len(), total);
+
+        // Enter search mode and type query
+        app.enter_search_mode();
+        assert_eq!(app.input_mode, InputMode::SearchInput);
+
+        app.search_push_char('s');
+        app.search_push_char('o');
+        app.search_push_char('l');
+        app.search_push_char('o');
+        assert_eq!(app.search_query, "solo");
+        assert_eq!(app.filtered_indices.len(), 1);
+        assert_eq!(app.current_series().unwrap().series.title, "Solo Leveling");
+
+        // Backspace
+        app.search_pop_char();
+        app.search_pop_char();
+        app.search_pop_char();
+        app.search_pop_char();
+        assert_eq!(app.search_query, "");
+        assert_eq!(app.filtered_indices.len(), total);
+
+        // Exit search mode with clear
+        app.search_push_char('z');
+        app.search_push_char('z');
+        assert_eq!(app.filtered_indices.len(), 0);
+        assert!(app.current_series().is_none());
+
+        app.exit_search_mode(true);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.search_query, "");
+        assert_eq!(app.filtered_indices.len(), total);
+    }
+
+    #[test]
+    fn test_filter_modes_cycle_and_clear() {
+        let mut app = test_app();
+        let total = app.series_list.len();
+
+        assert_eq!(app.filter_mode, FilterMode::All);
+        app.toggle_filter_mode();
+        assert_eq!(app.filter_mode, FilterMode::Unread);
+
+        app.toggle_filter_mode();
+        assert_eq!(app.filter_mode, FilterMode::Ongoing);
+
+        app.toggle_filter_mode();
+        assert_eq!(app.filter_mode, FilterMode::Completed);
+
+        app.toggle_filter_mode();
+        assert_eq!(app.filter_mode, FilterMode::All);
+        assert_eq!(app.filtered_indices.len(), total);
+
+        // Test clear_search_and_filters
+        app.search_push_char('t');
+        app.toggle_filter_mode();
+        assert!(!app.search_query.is_empty());
+        assert_ne!(app.filter_mode, FilterMode::All);
+
+        app.clear_search_and_filters();
+        assert_eq!(app.search_query, "");
+        assert_eq!(app.filter_mode, FilterMode::All);
+        assert_eq!(app.filtered_indices.len(), total);
     }
 }
