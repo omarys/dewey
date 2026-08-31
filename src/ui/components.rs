@@ -91,7 +91,10 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
             " 🔍 Search: \"{}\"_ [ESC: Cancel, ↵: Done] ",
             app.search_query
         )
-    } else if !app.search_query.is_empty() || app.filter_mode != FilterMode::All || app.show_hidden {
+    } else if !app.search_query.is_empty()
+        || app.filter_mode != FilterMode::All
+        || app.hidden_filter != crate::app::HiddenFilter::Hide
+    {
         let mut filter_desc = Vec::new();
         if !app.search_query.is_empty() {
             filter_desc.push(format!("🔍 \"{}\"", app.search_query));
@@ -99,8 +102,10 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
         if app.filter_mode != FilterMode::All {
             filter_desc.push(format!("Filter: {}", app.filter_mode.label()));
         }
-        if app.show_hidden {
-            filter_desc.push("👁 Hidden Shown".to_string());
+        match app.hidden_filter {
+            crate::app::HiddenFilter::Hide => {}
+            crate::app::HiddenFilter::Show => filter_desc.push("👁 Show All".to_string()),
+            crate::app::HiddenFilter::Only => filter_desc.push("👁 Only Hidden".to_string()),
         }
         format!(
             " 1. Series ({}/{}) [{}] ",
@@ -748,7 +753,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            if app.show_hidden { "Hide .Dirs  " } else { "Show .Dirs  " },
+            format!("Hidden: {}  ", app.hidden_filter.label()),
             Style::default().fg(theme.fg),
         ),
         Span::styled(
@@ -870,14 +875,14 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  .                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Toggle visibility of hidden series / .Other folders"),
+            Span::raw("Cycle hidden series filter (Hide → Show All → Only Hidden)"),
         ]),
         Line::from(vec![
             Span::styled(
                 "  H                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Toggle hidden tag on selected series (adds/removes '.' prefix)"),
+            Span::raw("Toggle hidden tag on selected series (relocates to/from .Other)"),
         ]),
         Line::from(vec![
             Span::styled(

@@ -30,6 +30,32 @@ pub enum InputMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HiddenFilter {
+    #[default]
+    Hide,
+    Show,
+    Only,
+}
+
+impl HiddenFilter {
+    pub fn next(self) -> Self {
+        match self {
+            HiddenFilter::Hide => HiddenFilter::Show,
+            HiddenFilter::Show => HiddenFilter::Only,
+            HiddenFilter::Only => HiddenFilter::Hide,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HiddenFilter::Hide => "Hide",
+            HiddenFilter::Show => "Show",
+            HiddenFilter::Only => "Only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterMode {
     #[default]
     All,
@@ -106,7 +132,7 @@ pub struct App {
     pub search_query: String,
     pub filter_mode: FilterMode,
     pub filtered_indices: Vec<usize>,
-    pub show_hidden: bool,
+    pub hidden_filter: HiddenFilter,
 
     pub available_categories: Vec<String>,
     pub category_input: String,
@@ -159,7 +185,7 @@ impl App {
             search_query: String::new(),
             filter_mode: FilterMode::All,
             filtered_indices: Vec::new(),
-            show_hidden: false,
+            hidden_filter: HiddenFilter::Hide,
             available_categories: Vec::new(),
             category_input: String::new(),
             category_selected_idx: 0,
@@ -254,9 +280,19 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, s)| {
-                // 1. Hidden filter: exclude hidden series unless show_hidden is true
-                if s.series.is_hidden && !self.show_hidden {
-                    return false;
+                // 1. Hidden filter: Hide (hide hidden), Show (show both), Only (show only hidden)
+                match self.hidden_filter {
+                    HiddenFilter::Hide => {
+                        if s.series.is_hidden {
+                            return false;
+                        }
+                    }
+                    HiddenFilter::Show => {}
+                    HiddenFilter::Only => {
+                        if !s.series.is_hidden {
+                            return false;
+                        }
+                    }
                 }
 
                 // 2. Status Filter
@@ -512,17 +548,19 @@ impl App {
         Ok(())
     }
 
-    pub fn toggle_show_hidden(&mut self) {
-        self.show_hidden = !self.show_hidden;
+    pub fn cycle_hidden_filter(&mut self) {
+        self.hidden_filter = self.hidden_filter.next();
         self.apply_filter();
-        self.set_toast(
-            if self.show_hidden {
-                "Showing hidden series"
-            } else {
-                "Hiding hidden series"
-            },
-            false,
-        );
+        let msg = match self.hidden_filter {
+            HiddenFilter::Hide => "Hiding hidden series",
+            HiddenFilter::Show => "Showing all series (including hidden)",
+            HiddenFilter::Only => "Showing ONLY hidden series",
+        };
+        self.set_toast(msg, false);
+    }
+
+    pub fn toggle_show_hidden(&mut self) {
+        self.cycle_hidden_filter();
     }
 
     pub fn toggle_selected_series_hidden(&mut self) -> Result<()> {
@@ -1439,18 +1477,23 @@ mod tests {
         app.db.update_series_hidden(first_id, true).unwrap();
         app.reload_series().unwrap();
 
-        // By default show_hidden is false, so 1 fewer series in filtered_indices
-        assert!(!app.show_hidden);
+        // 1. By default HiddenFilter::Hide -> 1 fewer series in filtered_indices
+        assert_eq!(app.hidden_filter, HiddenFilter::Hide);
         assert_eq!(app.filtered_indices.len(), total - 1);
 
-        // Toggle show_hidden -> now all series are visible
-        app.toggle_show_hidden();
-        assert!(app.show_hidden);
+        // 2. Cycle to HiddenFilter::Show -> now all series are visible
+        app.cycle_hidden_filter();
+        assert_eq!(app.hidden_filter, HiddenFilter::Show);
         assert_eq!(app.filtered_indices.len(), total);
 
-        // Toggle show_hidden back -> hidden series is filtered out again
-        app.toggle_show_hidden();
-        assert!(!app.show_hidden);
+        // 3. Cycle to HiddenFilter::Only -> only hidden series (1 series)
+        app.cycle_hidden_filter();
+        assert_eq!(app.hidden_filter, HiddenFilter::Only);
+        assert_eq!(app.filtered_indices.len(), 1);
+
+        // 4. Cycle back to HiddenFilter::Hide -> hidden series filtered out again
+        app.cycle_hidden_filter();
+        assert_eq!(app.hidden_filter, HiddenFilter::Hide);
         assert_eq!(app.filtered_indices.len(), total - 1);
     }
 
@@ -1474,7 +1517,7 @@ mod tests {
         cfg.library_dir = temp_lib.clone();
         cfg.auto_scan_on_startup = false;
         let mut app = App::new(cfg, db, tx).unwrap();
-        app.show_hidden = true;
+        app.hidden_filter = HiddenFilter::Show;
         app.reload_series().unwrap();
 
         assert_eq!(app.series_list.len(), 1);
