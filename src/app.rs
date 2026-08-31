@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ratatui::layout::Rect;
 use ratatui::widgets::{ListState, TableState};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,7 @@ pub enum AppAction {
     SwitchPane,
     Search,
     Filter,
+    ToggleHidden,
     Quit,
 }
 
@@ -103,6 +104,7 @@ pub struct App {
     pub search_query: String,
     pub filter_mode: FilterMode,
     pub filtered_indices: Vec<usize>,
+    pub show_hidden: bool,
 
     pub active_pane: ActivePane,
     pub download_jobs: Vec<DownloadJob>,
@@ -151,6 +153,7 @@ impl App {
             search_query: String::new(),
             filter_mode: FilterMode::All,
             filtered_indices: Vec::new(),
+            show_hidden: false,
             active_pane: ActivePane::SeriesList,
             download_jobs: Vec::new(),
             tick_count: 0,
@@ -242,7 +245,12 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, s)| {
-                // 1. Status Filter
+                // 1. Hidden filter: exclude hidden series unless show_hidden is true
+                if s.series.is_hidden && !self.show_hidden {
+                    return false;
+                }
+
+                // 2. Status Filter
                 let matches_status = match self.filter_mode {
                     FilterMode::All => true,
                     FilterMode::Unread => {
@@ -270,7 +278,7 @@ impl App {
                     return false;
                 }
 
-                // 2. Search Query Tokens
+                // 3. Search Query Tokens
                 if query_tokens.is_empty() {
                     return true;
                 }
@@ -302,6 +310,98 @@ impl App {
         }
 
         let _ = self.reload_chapters();
+    }
+
+    pub fn toggle_show_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.apply_filter();
+        self.set_toast(
+            if self.show_hidden {
+                "Showing hidden series"
+            } else {
+                "Hiding hidden series"
+            },
+            false,
+        );
+    }
+
+    pub fn toggle_selected_series_hidden(&mut self) -> Result<()> {
+        let current = match self.current_series() {
+            Some(s) => s.clone(),
+            None => {
+                self.set_toast("No series selected", true);
+                return Ok(());
+            }
+        };
+
+        let series_id = current.series.id;
+        let title = &current.series.title;
+
+        // Find existing series directory from chapters or cover
+        let chapters = self.db.get_chapters_for_series(series_id)?;
+        let existing_file_dir = chapters
+            .iter()
+            .find_map(|c| c.chapter.file_path.as_deref())
+            .map(Path::new)
+            .filter(|p| p.exists())
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+        let cover_dir = current
+            .series
+            .cover_path
+            .as_deref()
+            .map(Path::new)
+            .filter(|p| p.exists())
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+        let series_dir = existing_file_dir.or(cover_dir).unwrap_or_else(|| {
+            let safe_name = title.replace(' ', "_");
+            if current.series.is_hidden {
+                self.config.library_dir.join(format!(".{}", safe_name))
+            } else {
+                self.config.library_dir.join(safe_name)
+            }
+        });
+
+        let folder_name = series_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let parent_dir = series_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.config.library_dir.clone());
+
+        let (new_dir, new_is_hidden) = if folder_name.starts_with('.') {
+            let clean_name = folder_name.trim_start_matches('.');
+            (parent_dir.join(clean_name), false)
+        } else {
+            let dot_name = format!(".{}", folder_name);
+            (parent_dir.join(dot_name), true)
+        };
+
+        if series_dir.exists() {
+            if new_dir.exists() {
+                let msg = format!("Cannot rename: directory '{:?}' already exists", new_dir);
+                self.set_toast(msg, true);
+                return Ok(());
+            }
+            std::fs::rename(&series_dir, &new_dir)
+                .with_context(|| format!("Failed to rename {:?} to {:?}", series_dir, new_dir))?;
+            self.db
+                .rename_series_directory(series_id, &series_dir, &new_dir, new_is_hidden)?;
+        } else {
+            self.db.update_series_hidden(series_id, new_is_hidden)?;
+        }
+
+        self.reload_series()?;
+        let status_label = if new_is_hidden { "hidden" } else { "unhidden" };
+        self.set_toast(
+            format!("Series '{}' marked as {}", title, status_label),
+            false,
+        );
+        Ok(())
     }
 
     pub fn enter_search_mode(&mut self) {
@@ -1093,5 +1193,80 @@ mod tests {
         assert_eq!(app.search_query, "");
         assert_eq!(app.filter_mode, FilterMode::All);
         assert_eq!(app.filtered_indices.len(), total);
+    }
+
+    #[test]
+    fn test_hidden_series_filter_and_toggle() {
+        let mut app = test_app();
+        let total = app.series_list.len();
+
+        // Mark first series as hidden in DB
+        let first_id = app.series_list[0].series.id;
+        app.db.update_series_hidden(first_id, true).unwrap();
+        app.reload_series().unwrap();
+
+        // By default show_hidden is false, so 1 fewer series in filtered_indices
+        assert!(!app.show_hidden);
+        assert_eq!(app.filtered_indices.len(), total - 1);
+
+        // Toggle show_hidden -> now all series are visible
+        app.toggle_show_hidden();
+        assert!(app.show_hidden);
+        assert_eq!(app.filtered_indices.len(), total);
+
+        // Toggle show_hidden back -> hidden series is filtered out again
+        app.toggle_show_hidden();
+        assert!(!app.show_hidden);
+        assert_eq!(app.filtered_indices.len(), total - 1);
+    }
+
+    #[test]
+    fn test_toggle_selected_series_hidden_directory_rename() {
+        let temp_lib = std::env::temp_dir().join(format!("dewey_app_rename_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_lib);
+        std::fs::create_dir_all(&temp_lib).unwrap();
+
+        let series_dir = temp_lib.join("My_Manga");
+        std::fs::create_dir_all(&series_dir).unwrap();
+        let ch_path = series_dir.join("c001.cbz");
+        std::fs::write(&ch_path, b"dummy").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let series_id = db.insert_or_get_series_with_cover_and_hidden("My Manga", None, false).unwrap();
+        db.record_chapter_download(series_id, 1.0, ch_path.to_str().unwrap(), Some(10), None).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut cfg = Config::default();
+        cfg.library_dir = temp_lib.clone();
+        cfg.auto_scan_on_startup = false;
+        let mut app = App::new(cfg, db, tx).unwrap();
+        app.show_hidden = true;
+        app.reload_series().unwrap();
+
+        assert_eq!(app.series_list.len(), 1);
+        assert!(!app.series_list[0].series.is_hidden);
+        assert!(series_dir.exists());
+
+        // Toggle to hidden
+        app.toggle_selected_series_hidden().unwrap();
+        let hidden_dir = temp_lib.join(".My_Manga");
+        assert!(hidden_dir.exists());
+        assert!(!series_dir.exists());
+        assert!(app.series_list[0].series.is_hidden);
+
+        // Chapter file path should be updated in DB
+        let chapters = app.db.get_chapters_for_series(series_id).unwrap();
+        assert_eq!(
+            chapters[0].chapter.file_path.as_deref(),
+            Some(hidden_dir.join("c001.cbz").to_str().unwrap())
+        );
+
+        // Toggle back to unhidden
+        app.toggle_selected_series_hidden().unwrap();
+        assert!(series_dir.exists());
+        assert!(!hidden_dir.exists());
+        assert!(!app.series_list[0].series.is_hidden);
+
+        let _ = std::fs::remove_dir_all(&temp_lib);
     }
 }

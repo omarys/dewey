@@ -91,13 +91,16 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
             " 🔍 Search: \"{}\"_ [ESC: Cancel, ↵: Done] ",
             app.search_query
         )
-    } else if !app.search_query.is_empty() || app.filter_mode != FilterMode::All {
+    } else if !app.search_query.is_empty() || app.filter_mode != FilterMode::All || app.show_hidden {
         let mut filter_desc = Vec::new();
         if !app.search_query.is_empty() {
             filter_desc.push(format!("🔍 \"{}\"", app.search_query));
         }
         if app.filter_mode != FilterMode::All {
             filter_desc.push(format!("Filter: {}", app.filter_mode.label()));
+        }
+        if app.show_hidden {
+            filter_desc.push("👁 Hidden Shown".to_string());
         }
         format!(
             " 1. Series ({}/{}) [{}] ",
@@ -141,6 +144,12 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
                     _ => Span::raw(" "),
                 };
 
+                let hidden_badge = if s.series.is_hidden {
+                    Span::styled(" [HIDDEN] ", theme.error_badge())
+                } else {
+                    Span::raw("")
+                };
+
                 let read_indicator = if let Some(last_ch) = s.stats.latest_read_chapter {
                     Span::styled(
                         format!("Ch.{:.0} ", last_ch),
@@ -178,6 +187,7 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
                             Style::default().fg(theme.fg)
                         },
                     ),
+                    hidden_badge,
                     read_indicator,
                     Span::styled(
                         format!("{:>7}", count_info),
@@ -602,6 +612,7 @@ pub fn render_action_bar(
             ("⏭ Next", AppAction::FetchNext),
             ("🔍 Find", AppAction::Search),
             ("⚡ Filter", AppAction::Filter),
+            ("👁 Tag", AppAction::ToggleHidden),
         ];
 
         let row2_actions = [
@@ -613,8 +624,8 @@ pub fn render_action_bar(
         ];
 
         for (actions, row_area) in [
-            (&row1_actions, row_chunks[0]),
-            (&row2_actions, row_chunks[1]),
+            (&row1_actions[..], row_chunks[0]),
+            (&row2_actions[..], row_chunks[1]),
         ] {
             let n = actions.len() as u16;
             let cells = Layout::default()
@@ -647,6 +658,7 @@ pub fn render_action_bar(
             ("⏭ Next", AppAction::FetchNext),
             ("🔍 Find", AppAction::Search),
             ("⚡ Filter", AppAction::Filter),
+            ("👁 Tag", AppAction::ToggleHidden),
             ("🔄 Mode", AppAction::Mode),
             ("✓ Mark", AppAction::MarkRead),
             ("📁 Scan", AppAction::Scan),
@@ -690,6 +702,7 @@ fn action_key(action: AppAction) -> &'static str {
         AppAction::SwitchPane => "Tab",
         AppAction::Search => "/",
         AppAction::Filter => "f",
+        AppAction::ToggleHidden => "H",
         AppAction::Quit => "q",
     }
 }
@@ -713,6 +726,23 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             format!("Filter: {}  ", app.filter_mode.label()),
             Style::default().fg(theme.fg),
         ),
+        Span::styled(
+            " [^H] ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if app.show_hidden { "Hide .Dirs  " } else { "Show .Dirs  " },
+            Style::default().fg(theme.fg),
+        ),
+        Span::styled(
+            " [H] ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Tag Hidden  ", Style::default().fg(theme.fg)),
         Span::styled(
             " [Enter] ",
             Style::default()
@@ -805,6 +835,20 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Cycle status filter (All → Unread → Ongoing → Completed)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Ctrl+h                ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Toggle visibility of hidden series (starts with '.')"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  H                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Toggle hidden tag on selected series (adds/removes '.' prefix)"),
         ]),
         Line::from(vec![
             Span::styled(

@@ -12,6 +12,7 @@ pub struct Series {
     pub fetch_url: Option<String>,
     pub metadata_json: Option<String>,
     pub reading_mode: Option<String>,
+    pub is_hidden: bool,
 }
 
 impl Series {

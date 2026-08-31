@@ -157,10 +157,15 @@ impl LibraryScanner {
         // 1. Read series.json if present for richer metadata
         let series_meta = Self::read_series_json_from_entries(&entries);
 
-        let folder_name = path
+        let raw_name = path
             .file_name()
-            .map(|n| n.to_string_lossy().replace('_', " "))
-            .unwrap_or_else(|| "Unknown Series".to_string());
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown_Series".to_string());
+
+        let is_hidden = raw_name.starts_with('.');
+        let folder_name = raw_name
+            .trim_start_matches('.')
+            .replace('_', " ");
 
         let series_title = series_meta
             .as_ref()
@@ -168,9 +173,10 @@ impl LibraryScanner {
             .unwrap_or(folder_name);
 
         let cover_path = Self::find_cover_image_from_entries(&entries);
-        let series_id = db.insert_or_get_series_with_cover(
+        let series_id = db.insert_or_get_series_with_cover_and_hidden(
             &series_title,
             cover_path.as_deref().and_then(|p| p.to_str()),
+            is_hidden,
         )?;
 
         // Update series metadata / status / fetch_url if found in series.json
@@ -294,7 +300,9 @@ impl LibraryScanner {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.is_dir() {
-                        stack.push(p);
+                        if !Self::is_special_dir(&p) {
+                            stack.push(p);
+                        }
                     } else if Self::is_chapter_file(&p) {
                         return true;
                     }
@@ -306,9 +314,15 @@ impl LibraryScanner {
 
     fn is_special_dir(path: &Path) -> bool {
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            name.starts_with('.')
-                || name.eq_ignore_ascii_case("covers")
-                || name.eq_ignore_ascii_case("metadata")
+            let lower = name.to_lowercase();
+            lower == ".git"
+                || lower == ".dewey"
+                || lower.starts_with(".dewey.")
+                || lower == ".trash"
+                || lower == ".cache"
+                || lower == "lost+found"
+                || lower == "covers"
+                || lower == "metadata"
         } else {
             true
         }
@@ -694,5 +708,34 @@ mod tests {
         ];
         let cover = LibraryScanner::find_cover_image_from_entries(&entries);
         assert_eq!(cover, Some(PathBuf::from("/manga/Solo/folder.jpg")));
+    }
+
+    #[test]
+    fn test_hidden_series_folder_tagged() {
+        let root = std::env::temp_dir().join(format!("dewey_hidden_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let hidden_dir = root.join(".Secret_Series");
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        std::fs::write(hidden_dir.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        let visible_dir = root.join("Normal_Series");
+        std::fs::create_dir_all(&visible_dir).unwrap();
+        std::fs::write(visible_dir.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
+
+        assert_eq!(summary.series_found, 2);
+        let series = db.get_all_series().unwrap();
+        assert_eq!(series.len(), 2);
+
+        let secret = series.iter().find(|s| s.series.title == "Secret Series").unwrap();
+        assert!(secret.series.is_hidden);
+
+        let normal = series.iter().find(|s| s.series.title == "Normal Series").unwrap();
+        assert!(!normal.series.is_hidden);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

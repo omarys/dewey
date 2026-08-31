@@ -281,6 +281,9 @@ async fn main() -> Result<()> {
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                 app.should_quit = true;
                             }
+                            (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+                                app.toggle_show_hidden();
+                            }
                             (KeyCode::Esc, _) => {
                                 app.exit_search_mode(true);
                             }
@@ -303,6 +306,9 @@ async fn main() -> Result<()> {
                         | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                             app.should_quit = true;
                         }
+                        (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+                            app.toggle_show_hidden();
+                        }
                         (KeyCode::Char('?'), _) => {
                             app.show_help_modal = true;
                         }
@@ -311,6 +317,14 @@ async fn main() -> Result<()> {
                         }
                         (KeyCode::Char('f'), KeyModifiers::NONE) | (KeyCode::Char('F'), _) => {
                             app.toggle_filter_mode();
+                        }
+                        (KeyCode::Char('H'), _) => {
+                            if let Err(err) = app.toggle_selected_series_hidden() {
+                                app.set_toast(
+                                    format!("Failed to toggle hidden tag: {}", err),
+                                    true,
+                                );
+                            }
                         }
                         (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                             app.next_item();
@@ -457,6 +471,14 @@ async fn main() -> Result<()> {
                                     }
                                     AppAction::Filter => {
                                         app.toggle_filter_mode();
+                                    }
+                                    AppAction::ToggleHidden => {
+                                        if let Err(err) = app.toggle_selected_series_hidden() {
+                                            app.set_toast(
+                                                format!("Failed to toggle hidden tag: {}", err),
+                                                true,
+                                            );
+                                        }
                                     }
                                     AppAction::Mode => {
                                         if let Err(err) = app.toggle_reading_mode_selected() {

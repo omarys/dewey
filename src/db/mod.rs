@@ -95,6 +95,10 @@ impl Database {
             "ALTER TABLE series ADD COLUMN reading_mode TEXT DEFAULT 'webtoon'",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE series ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE chapters ADD COLUMN fetch_url TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path)",
@@ -119,7 +123,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT
-                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json, s.reading_mode,
+                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json, s.reading_mode, s.is_hidden,
                 COUNT(c.id) AS total_count,
                 SUM(CASE WHEN c.file_path IS NOT NULL AND c.file_path != '' THEN 1 ELSE 0 END) AS downloaded_count,
                 SUM(CASE WHEN p.is_completed = 1 THEN 1 ELSE 0 END) AS completed_count,
@@ -134,6 +138,7 @@ impl Database {
 
         let series_list = stmt
             .query_map([], |row| {
+                let is_hidden_int: i64 = row.get(8).unwrap_or(0);
                 let series = Series {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -143,13 +148,14 @@ impl Database {
                     fetch_url: row.get(5)?,
                     metadata_json: row.get(6)?,
                     reading_mode: row.get(7)?,
+                    is_hidden: is_hidden_int != 0,
                 };
 
-                let total_count: i64 = row.get(8).unwrap_or(0);
-                let downloaded_count: i64 = row.get(9).unwrap_or(0);
-                let completed_count: i64 = row.get(10).unwrap_or(0);
-                let latest_read_chap: Option<f64> = row.get(11)?;
-                let latest_read_time_str: Option<String> = row.get(12)?;
+                let total_count: i64 = row.get(9).unwrap_or(0);
+                let downloaded_count: i64 = row.get(10).unwrap_or(0);
+                let completed_count: i64 = row.get(11).unwrap_or(0);
+                let latest_read_chap: Option<f64> = row.get(12)?;
+                let latest_read_time_str: Option<String> = row.get(13)?;
 
                 let last_read_at = latest_read_time_str.and_then(|s| {
                     DateTime::parse_from_rfc3339(&s)
@@ -457,9 +463,78 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_series_hidden(&self, series_id: i64, is_hidden: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE series SET is_hidden = ?1 WHERE id = ?2",
+            params![if is_hidden { 1 } else { 0 }, series_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_series_directory(
+        &self,
+        series_id: i64,
+        old_dir: &Path,
+        new_dir: &Path,
+        is_hidden: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let old_dir_str = old_dir.to_string_lossy().to_string();
+        let new_dir_str = new_dir.to_string_lossy().to_string();
+
+        // 1. Update series cover_path if it begins with old_dir_str
+        let existing_cover: Option<String> = conn
+            .query_row(
+                "SELECT cover_path FROM series WHERE id = ?1",
+                params![series_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+
+        if let Some(cover) = existing_cover {
+            if cover.starts_with(&old_dir_str) {
+                let updated_cover = cover.replacen(&old_dir_str, &new_dir_str, 1);
+                let _ = conn.execute(
+                    "UPDATE series SET cover_path = ?1 WHERE id = ?2",
+                    params![updated_cover, series_id],
+                );
+            }
+        }
+
+        // 2. Update all chapter file_paths for this series that begin with old_dir_str
+        let mut stmt = conn.prepare("SELECT id, file_path FROM chapters WHERE series_id = ?1")?;
+        let rows = stmt
+            .query_map(params![series_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (ch_id, file_path_opt) in rows {
+            if let Some(fp) = file_path_opt {
+                if fp.starts_with(&old_dir_str) {
+                    let updated_fp = fp.replacen(&old_dir_str, &new_dir_str, 1);
+                    let _ = conn.execute(
+                        "UPDATE chapters SET file_path = ?1 WHERE id = ?2",
+                        params![updated_fp, ch_id],
+                    );
+                }
+            }
+        }
+
+        // 3. Update is_hidden flag
+        conn.execute(
+            "UPDATE series SET is_hidden = ?1 WHERE id = ?2",
+            params![if is_hidden { 1 } else { 0 }, series_id],
+        )?;
+
+        Ok(())
+    }
+
     pub fn insert_or_get_series(&self, title: &str) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        self.insert_or_get_series_inner(&conn, title, None)
+        self.insert_or_get_series_inner(&conn, title, None, false)
     }
 
     pub fn insert_or_get_series_with_cover(
@@ -468,7 +543,17 @@ impl Database {
         cover_path: Option<&str>,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        self.insert_or_get_series_inner(&conn, title, cover_path)
+        self.insert_or_get_series_inner(&conn, title, cover_path, false)
+    }
+
+    pub fn insert_or_get_series_with_cover_and_hidden(
+        &self,
+        title: &str,
+        cover_path: Option<&str>,
+        is_hidden: bool,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        self.insert_or_get_series_inner(&conn, title, cover_path, is_hidden)
     }
 
     fn insert_or_get_series_inner(
@@ -476,6 +561,7 @@ impl Database {
         conn: &Connection,
         title: &str,
         cover_path: Option<&str>,
+        is_hidden: bool,
     ) -> Result<i64> {
         let existing: Option<(i64, Option<String>)> = conn
             .query_row(
@@ -492,11 +578,15 @@ impl Database {
                     params![cover_path, id],
                 );
             }
+            let _ = conn.execute(
+                "UPDATE series SET is_hidden = ?1 WHERE id = ?2",
+                params![if is_hidden { 1 } else { 0 }, id],
+            );
             Ok(id)
         } else {
             conn.execute(
-                "INSERT INTO series (title, sort_title, status, cover_path) VALUES (?1, ?1, 'Ongoing', ?2)",
-                params![title, cover_path],
+                "INSERT INTO series (title, sort_title, status, cover_path, is_hidden) VALUES (?1, ?1, 'Ongoing', ?2, ?3)",
+                params![title, cover_path, if is_hidden { 1 } else { 0 }],
             )?;
             Ok(conn.last_insert_rowid())
         }
@@ -507,7 +597,7 @@ impl Database {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?;
 
         if count == 0 {
-            let series_id = self.insert_or_get_series_inner(&conn, "Solo Leveling", None)?;
+            let series_id = self.insert_or_get_series_inner(&conn, "Solo Leveling", None, false)?;
             conn.execute(
                 "UPDATE series SET
                     sort_title = 'Solo Leveling',
@@ -542,7 +632,7 @@ impl Database {
                 )?;
             }
 
-            let s2_id = self.insert_or_get_series_inner(&conn, "Chainsaw Man", None)?;
+            let s2_id = self.insert_or_get_series_inner(&conn, "Chainsaw Man", None, false)?;
             conn.execute(
                 "UPDATE series SET
                     sort_title = 'Chainsaw Man',
@@ -965,9 +1055,9 @@ mod tests {
         let path_fast = dir.join(format!("dewey_test_fast_{}.db", std::process::id()));
         let path_usb = dir.join(format!("dewey_test_usb_{}.db", std::process::id()));
 
-        let db_fast =
+        let _db_fast =
             Database::open_with_profile(&path_fast, crate::config::StorageProfile::Fast).unwrap();
-        let db_usb =
+        let _db_usb =
             Database::open_with_profile(&path_usb, crate::config::StorageProfile::Usb).unwrap();
 
         assert!(path_fast.exists());
@@ -975,5 +1065,46 @@ mod tests {
 
         let _ = Database::reset(&path_fast);
         let _ = Database::reset(&path_usb);
+    }
+
+    #[test]
+    fn test_update_series_hidden_and_rename_directory() {
+        let db = Database::in_memory().unwrap();
+        let series_id = db
+            .insert_or_get_series_with_cover_and_hidden("Solo Leveling", Some("/manga/Solo/cover.jpg"), false)
+            .unwrap();
+
+        db.record_chapter_download(series_id, 1.0, "/manga/Solo/c001.cbz", Some(20), None)
+            .unwrap();
+
+        let series = db.get_all_series().unwrap();
+        assert!(!series[0].series.is_hidden);
+
+        // Test update_series_hidden
+        db.update_series_hidden(series_id, true).unwrap();
+        let series = db.get_all_series().unwrap();
+        assert!(series[0].series.is_hidden);
+
+        // Test rename_series_directory
+        db.rename_series_directory(
+            series_id,
+            Path::new("/manga/Solo"),
+            Path::new("/manga/.Solo"),
+            true,
+        )
+        .unwrap();
+
+        let series = db.get_all_series().unwrap();
+        assert_eq!(
+            series[0].series.cover_path.as_deref(),
+            Some("/manga/.Solo/cover.jpg")
+        );
+        assert!(series[0].series.is_hidden);
+
+        let chapters = db.get_chapters_for_series(series_id).unwrap();
+        assert_eq!(
+            chapters[0].chapter.file_path.as_deref(),
+            Some("/manga/.Solo/c001.cbz")
+        );
     }
 }
