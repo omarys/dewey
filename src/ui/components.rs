@@ -93,14 +93,18 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
         )
     } else if !app.search_query.is_empty()
         || app.filter_mode != FilterMode::All
+        || app.type_filter != crate::app::TypeFilter::All
         || app.hidden_filter != crate::app::HiddenFilter::Hide
     {
         let mut filter_desc = Vec::new();
         if !app.search_query.is_empty() {
             filter_desc.push(format!("🔍 \"{}\"", app.search_query));
         }
+        if app.type_filter != crate::app::TypeFilter::All {
+            filter_desc.push(format!("Type: {}", app.type_filter.label()));
+        }
         if app.filter_mode != FilterMode::All {
-            filter_desc.push(format!("Filter: {}", app.filter_mode.label()));
+            filter_desc.push(format!("Status: {}", app.filter_mode.label()));
         }
         match app.hidden_filter {
             crate::app::HiddenFilter::Hide => {}
@@ -641,7 +645,8 @@ pub fn render_action_bar(
         let row1_actions = [
             ("📖 Read", AppAction::Open),
             ("🔍 Find", AppAction::Search),
-            ("⚡ Filter", AppAction::Filter),
+            ("⚡ Status", AppAction::Filter),
+            ("📚 Type", AppAction::CycleType),
             ("👁 Hidden", AppAction::CycleHidden),
             ("🏷 Move", AppAction::TagCategory),
             ("🔒 Hide", AppAction::ToggleHidden),
@@ -688,7 +693,8 @@ pub fn render_action_bar(
         let actions = [
             ("📖 Read", AppAction::Open),
             ("🔍 Find", AppAction::Search),
-            ("⚡ Filter", AppAction::Filter),
+            ("⚡ Status", AppAction::Filter),
+            ("📚 Type", AppAction::CycleType),
             ("👁 Hidden", AppAction::CycleHidden),
             ("🏷 Move", AppAction::TagCategory),
             ("🔒 Hide", AppAction::ToggleHidden),
@@ -736,6 +742,7 @@ fn action_key(action: AppAction) -> &'static str {
         AppAction::SwitchPane => "Tab",
         AppAction::Search => "/",
         AppAction::Filter => "f",
+        AppAction::CycleType => "T",
         AppAction::CycleHidden => ".",
         AppAction::TagCategory => "t",
         AppAction::ToggleHidden => "H",
@@ -762,6 +769,13 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Cycle status filter (All → Unread → Ongoing → Completed)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  T                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Cycle type/medium filter (All → Manhwa → Manga → Comicbook)"),
         ]),
         Line::from(vec![
             Span::styled(

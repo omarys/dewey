@@ -57,6 +57,69 @@ impl HiddenFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TypeFilter {
+    #[default]
+    All,
+    Manhwa,
+    Manga,
+    Comicbook,
+}
+
+impl TypeFilter {
+    pub fn next(self) -> Self {
+        match self {
+            TypeFilter::All => TypeFilter::Manhwa,
+            TypeFilter::Manhwa => TypeFilter::Manga,
+            TypeFilter::Manga => TypeFilter::Comicbook,
+            TypeFilter::Comicbook => TypeFilter::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TypeFilter::All => "All",
+            TypeFilter::Manhwa => "Manhwa",
+            TypeFilter::Manga => "Manga",
+            TypeFilter::Comicbook => "Comicbook",
+        }
+    }
+
+    pub fn matches(self, category: Option<&str>, reading_mode: Option<&str>) -> bool {
+        match self {
+            TypeFilter::All => true,
+            TypeFilter::Manga => {
+                if let Some(cat) = category {
+                    let l = cat.to_lowercase();
+                    l.starts_with("manga") || l.split('/').any(|p| p.trim() == "manga")
+                } else {
+                    reading_mode == Some("manga")
+                }
+            }
+            TypeFilter::Manhwa => {
+                if let Some(cat) = category {
+                    let l = cat.to_lowercase();
+                    l.starts_with("manhwa")
+                        || l.starts_with("webtoon")
+                        || l.split('/').any(|p| p.trim() == "manhwa" || p.trim() == "webtoon")
+                } else {
+                    reading_mode == Some("webtoon")
+                }
+            }
+            TypeFilter::Comicbook => {
+                if let Some(cat) = category {
+                    let l = cat.to_lowercase();
+                    l.starts_with("comic")
+                        || l.starts_with("comicbook")
+                        || l.split('/').any(|p| p.trim() == "comic" || p.trim() == "comicbook")
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterMode {
     #[default]
     All,
@@ -101,6 +164,7 @@ pub enum AppAction {
     SwitchPane,
     Search,
     Filter,
+    CycleType,
     CycleHidden,
     ToggleHidden,
     TagCategory,
@@ -134,6 +198,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub search_query: String,
     pub filter_mode: FilterMode,
+    pub type_filter: TypeFilter,
     pub filtered_indices: Vec<usize>,
     pub hidden_filter: HiddenFilter,
 
@@ -187,6 +252,7 @@ impl App {
             input_mode: InputMode::Normal,
             search_query: String::new(),
             filter_mode: FilterMode::All,
+            type_filter: TypeFilter::All,
             filtered_indices: Vec::new(),
             hidden_filter: HiddenFilter::Hide,
             available_categories: Vec::new(),
@@ -302,7 +368,15 @@ impl App {
                     }
                 }
 
-                // 2. Status Filter
+                // 2. Type / Medium Filter (All / Manhwa / Manga / Comicbook)
+                if !self.type_filter.matches(
+                    s.series.category.as_deref(),
+                    Some(s.series.reading_mode()),
+                ) {
+                    return false;
+                }
+
+                // 3. Status Filter
                 let matches_status = match self.filter_mode {
                     FilterMode::All => true,
                     FilterMode::Unread => {
@@ -709,13 +783,28 @@ impl App {
     pub fn toggle_filter_mode(&mut self) {
         self.filter_mode = self.filter_mode.next();
         self.apply_filter();
-        self.set_toast(format!("Filter: {}", self.filter_mode.label()), false);
+        self.set_toast(format!("Status: {}", self.filter_mode.label()), false);
+    }
+
+    pub fn cycle_type_filter(&mut self) {
+        self.type_filter = self.type_filter.next();
+        self.apply_filter();
+        let msg = match self.type_filter {
+            TypeFilter::All => "Showing all types (Manga, Manhwa, Comicbook)",
+            TypeFilter::Manhwa => "Filtered by type: Manhwa",
+            TypeFilter::Manga => "Filtered by type: Manga",
+            TypeFilter::Comicbook => "Filtered by type: Comicbook",
+        };
+        self.set_toast(msg, false);
     }
 
     pub fn clear_search_and_filters(&mut self) {
-        let had_filters = !self.search_query.is_empty() || self.filter_mode != FilterMode::All;
+        let had_filters = !self.search_query.is_empty()
+            || self.filter_mode != FilterMode::All
+            || self.type_filter != TypeFilter::All;
         self.search_query.clear();
         self.filter_mode = FilterMode::All;
+        self.type_filter = TypeFilter::All;
         self.input_mode = InputMode::Normal;
         self.apply_filter();
         if had_filters {
@@ -1471,6 +1560,46 @@ mod tests {
         app.clear_search_and_filters();
         assert_eq!(app.search_query, "");
         assert_eq!(app.filter_mode, FilterMode::All);
+        assert_eq!(app.type_filter, TypeFilter::All);
+        assert_eq!(app.filtered_indices.len(), total);
+    }
+
+    #[test]
+    fn test_type_filter_cycle_and_matching() {
+        let mut app = test_app();
+        let total = app.series_list.len();
+
+        // Tag first series as "Manhwa/Action", second as "Manga/Comedy"
+        let id1 = app.series_list[0].series.id;
+        let id2 = app.series_list[1].series.id;
+        app.db.update_series_category(id1, Some("Manhwa/Action")).unwrap();
+        app.db.update_series_category(id2, Some("Manga/Comedy")).unwrap();
+        app.reload_series().unwrap();
+
+        // 1. Default: TypeFilter::All
+        assert_eq!(app.type_filter, TypeFilter::All);
+        assert_eq!(app.filtered_indices.len(), total);
+
+        // 2. Cycle to Manhwa -> should match only id1
+        app.cycle_type_filter();
+        assert_eq!(app.type_filter, TypeFilter::Manhwa);
+        assert_eq!(app.filtered_indices.len(), 1);
+        assert_eq!(app.current_series().unwrap().series.id, id1);
+
+        // 3. Cycle to Manga -> should match only id2
+        app.cycle_type_filter();
+        assert_eq!(app.type_filter, TypeFilter::Manga);
+        assert_eq!(app.filtered_indices.len(), 1);
+        assert_eq!(app.current_series().unwrap().series.id, id2);
+
+        // 4. Cycle to Comicbook -> 0 matches in sample test
+        app.cycle_type_filter();
+        assert_eq!(app.type_filter, TypeFilter::Comicbook);
+        assert_eq!(app.filtered_indices.len(), 0);
+
+        // 5. Cycle back to All
+        app.cycle_type_filter();
+        assert_eq!(app.type_filter, TypeFilter::All);
         assert_eq!(app.filtered_indices.len(), total);
     }
 

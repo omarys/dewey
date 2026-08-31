@@ -345,8 +345,11 @@ async fn main() -> Result<()> {
                         (KeyCode::Char('/'), KeyModifiers::NONE) => {
                             app.enter_search_mode();
                         }
-                        (KeyCode::Char('f'), KeyModifiers::NONE) | (KeyCode::Char('F'), _) => {
+                        (KeyCode::Char('f'), KeyModifiers::NONE) => {
                             app.toggle_filter_mode();
+                        }
+                        (KeyCode::Char('T'), _) => {
+                            app.cycle_type_filter();
                         }
                         (KeyCode::Char('H'), _) => {
                             if let Err(err) = app.toggle_selected_series_hidden() {
@@ -501,6 +504,9 @@ async fn main() -> Result<()> {
                                     }
                                     AppAction::Filter => {
                                         app.toggle_filter_mode();
+                                    }
+                                    AppAction::CycleType => {
+                                        app.cycle_type_filter();
                                     }
                                     AppAction::CycleHidden => {
                                         app.cycle_hidden_filter();
