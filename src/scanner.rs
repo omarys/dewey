@@ -213,7 +213,8 @@ impl LibraryScanner {
         while let Some(current_dir) = stack.pop() {
             if let Ok(entries) = fs::read_dir(&current_dir) {
                 let mut subdirs = Vec::new();
-                let mut has_direct_archives_or_meta = false;
+                let mut has_direct_archives = false;
+                let mut has_direct_meta = false;
                 let mut has_direct_images = false;
 
                 for entry in entries.flatten() {
@@ -222,8 +223,10 @@ impl LibraryScanner {
                         if !Self::is_special_dir(&p) {
                             subdirs.push(p);
                         }
-                    } else if Self::is_chapter_file(&p) || Self::is_series_meta_file(&p) {
-                        has_direct_archives_or_meta = true;
+                    } else if Self::is_chapter_file(&p) {
+                        has_direct_archives = true;
+                    } else if Self::is_series_meta_file(&p) {
+                        has_direct_meta = true;
                     } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                         let l = ext.to_lowercase();
                         if matches!(l.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") {
@@ -232,22 +235,28 @@ impl LibraryScanner {
                     }
                 }
 
-                // Check if all subdirectories are actual chapter folders (leaf folders containing images only)
+                // If this directory has subdirectories that are NOT leaf image chapters (e.g. child series folders or sub-categories),
+                // then this directory is strictly an organizational/category directory, NOT a series!
+                let has_sub_series_or_categories = !subdirs.is_empty()
+                    && subdirs.iter().any(|d| !Self::is_leaf_image_chapter(d));
+
                 let has_chapter_subdirs = !subdirs.is_empty()
                     && subdirs.iter().all(|d| Self::is_leaf_image_chapter(d));
 
-                if current_dir != library_dir
-                    && (has_direct_archives_or_meta
+                if current_dir != library_dir && !has_sub_series_or_categories {
+                    if has_direct_archives
                         || has_chapter_subdirs
-                        || (has_direct_images && subdirs.is_empty()))
-                {
-                    // This directory is a Series container! Do not recurse into its chapter contents.
-                    result.push(current_dir);
-                } else {
-                    // Category / organization folder (or root): recurse into subdirectories
-                    for subdir in subdirs {
-                        stack.push(subdir);
+                        || (subdirs.is_empty() && (has_direct_meta || has_direct_images))
+                    {
+                        // This directory is a Series container! Do not recurse into its chapter contents.
+                        result.push(current_dir);
+                        continue;
                     }
+                }
+
+                // Category / organization folder (or root): recurse into subdirectories
+                for subdir in subdirs {
+                    stack.push(subdir);
                 }
             }
         }
