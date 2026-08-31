@@ -301,6 +301,36 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
+                    if app.input_mode == app::InputMode::CategoryPicker {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                app.should_quit = true;
+                            }
+                            (KeyCode::Esc, _) => {
+                                app.close_category_modal();
+                            }
+                            (KeyCode::Enter, _) => {
+                                if let Err(err) = app.confirm_category_selection() {
+                                    app.set_toast(format!("Failed to move series: {}", err), true);
+                                }
+                            }
+                            (KeyCode::Down, _) | (KeyCode::Tab, _) => {
+                                app.category_modal_select_next();
+                            }
+                            (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
+                                app.category_modal_select_prev();
+                            }
+                            (KeyCode::Backspace, _) => {
+                                app.category_modal_pop_char();
+                            }
+                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                app.category_modal_push_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     match (key.code, key.modifiers) {
                         (KeyCode::Char('c'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('q'), KeyModifiers::NONE) => {
@@ -308,6 +338,9 @@ async fn main() -> Result<()> {
                         }
                         (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
                             app.toggle_show_hidden();
+                        }
+                        (KeyCode::Char('t'), KeyModifiers::NONE) => {
+                            app.open_category_modal();
                         }
                         (KeyCode::Char('?'), _) => {
                             app.show_help_modal = true;
@@ -471,6 +504,9 @@ async fn main() -> Result<()> {
                                     }
                                     AppAction::Filter => {
                                         app.toggle_filter_mode();
+                                    }
+                                    AppAction::TagCategory => {
+                                        app.open_category_modal();
                                     }
                                     AppAction::ToggleHidden => {
                                         if let Err(err) = app.toggle_selected_series_hidden() {

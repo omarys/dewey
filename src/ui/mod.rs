@@ -8,8 +8,9 @@ use ratatui::{
 
 use crate::app::{ActivePane, App};
 use components::{
-    render_action_bar, render_chapters_list, render_details_pane, render_downloads_bar,
-    render_footer, render_header, render_help_modal, render_portrait_tab_bar, render_series_list,
+    render_action_bar, render_category_modal, render_chapters_list, render_details_pane,
+    render_downloads_bar, render_footer, render_header, render_help_modal, render_portrait_tab_bar,
+    render_series_list,
 };
 use theme::Theme;
 
@@ -115,6 +116,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
         render_action_bar(f, main_chunks[3], app, &theme, false);
         render_footer(f, main_chunks[4], app, &theme);
+    }
+
+    if app.input_mode == crate::app::InputMode::CategoryPicker {
+        render_category_modal(f, app, &theme);
     }
 
     if app.show_help_modal {

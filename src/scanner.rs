@@ -71,12 +71,8 @@ impl LibraryScanner {
             "Scanning library directory for manga entries"
         );
 
-        // Collect series directories before fanning out work.
-        let series_dirs: Vec<PathBuf> = fs::read_dir(library_dir)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir() && !Self::is_special_dir(p))
-            .collect();
+        // Recursively collect series directories across all category subfolders.
+        let series_dirs = Self::find_series_directories(library_dir);
 
         if series_dirs.is_empty() {
             return Ok(ScanSummary::default());
@@ -107,7 +103,7 @@ impl LibraryScanner {
                             if i >= series_dirs.len() {
                                 break;
                             }
-                            match Self::scan_one_series(db, &series_dirs[i]) {
+                            match Self::scan_one_series(db, &series_dirs[i], library_dir) {
                                 Ok(one) => {
                                     local.series_found += one.series_found;
                                     local.chapters_found += one.chapters_found;
@@ -146,8 +142,64 @@ impl LibraryScanner {
         Ok(summary)
     }
 
+    /// Recursively discovers series directories under the root library directory.
+    pub fn find_series_directories(library_dir: &Path) -> Vec<PathBuf> {
+        let mut result = Vec::new();
+        let mut stack = vec![library_dir.to_path_buf()];
+
+        while let Some(current_dir) = stack.pop() {
+            if let Ok(entries) = fs::read_dir(&current_dir) {
+                let mut subdirs = Vec::new();
+                let mut has_direct_archives_or_meta = false;
+
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        if !Self::is_special_dir(&p) {
+                            subdirs.push(p);
+                        }
+                    } else if Self::is_chapter_file(&p) || Self::is_series_meta_file(&p) {
+                        has_direct_archives_or_meta = true;
+                    }
+                }
+
+                // Check if subdirectories look like chapter folders (e.g. "Chapter 1", "c001")
+                let has_chapter_subdirs = !subdirs.is_empty()
+                    && subdirs
+                        .iter()
+                        .any(|d| Self::parse_chapter_number(d).is_some());
+
+                if current_dir != library_dir && (has_direct_archives_or_meta || has_chapter_subdirs)
+                {
+                    // This directory is a Series container! Do not recurse into its chapter contents.
+                    result.push(current_dir);
+                } else if current_dir != library_dir && subdirs.is_empty() {
+                    // Leaf folder that may contain unpacked image pages
+                    result.push(current_dir);
+                } else {
+                    // Category / organization folder: recurse into subdirectories
+                    for subdir in subdirs {
+                        stack.push(subdir);
+                    }
+                }
+            }
+        }
+
+        result.sort();
+        result
+    }
+
+    fn is_series_meta_file(path: &Path) -> bool {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            let l = name.to_lowercase();
+            l == "series.json" || l == "cover.jpg" || l == "cover.png" || l == "cover.webp"
+        } else {
+            false
+        }
+    }
+
     /// Scans a single series directory and returns its contribution to the summary.
-    fn scan_one_series(db: &Database, path: &Path) -> Result<ScanSummary> {
+    fn scan_one_series(db: &Database, path: &Path, library_dir: &Path) -> Result<ScanSummary> {
         let mut summary = ScanSummary::default();
         summary.series_found += 1;
 
@@ -162,7 +214,6 @@ impl LibraryScanner {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown_Series".to_string());
 
-        let is_hidden = raw_name.starts_with('.');
         let folder_name = raw_name
             .trim_start_matches('.')
             .replace('_', " ");
@@ -172,11 +223,38 @@ impl LibraryScanner {
             .and_then(|m| m.name.clone())
             .unwrap_or(folder_name);
 
+        // 2. Compute relative path from library_dir to determine category and hidden status
+        let rel_path = path.strip_prefix(library_dir).unwrap_or(path);
+
+        let mut is_hidden = raw_name.starts_with('.');
+        let mut category_parts = Vec::new();
+
+        // Traverse ancestor components relative to library_dir
+        if let Some(parent_rel) = rel_path.parent() {
+            for component in parent_rel.components() {
+                let comp_str = component.as_os_str().to_string_lossy();
+                if comp_str.starts_with('.') {
+                    is_hidden = true;
+                }
+                let clean_comp = comp_str.trim_start_matches('.');
+                if !clean_comp.is_empty() && !clean_comp.eq_ignore_ascii_case("other") {
+                    category_parts.push(clean_comp.to_string());
+                }
+            }
+        }
+
+        let category = if category_parts.is_empty() {
+            None
+        } else {
+            Some(category_parts.join("/"))
+        };
+
         let cover_path = Self::find_cover_image_from_entries(&entries);
-        let series_id = db.insert_or_get_series_with_cover_and_hidden(
+        let series_id = db.insert_or_get_series_full(
             &series_title,
             cover_path.as_deref().and_then(|p| p.to_str()),
             is_hidden,
+            category.as_deref(),
         )?;
 
         // Update series metadata / status / fetch_url if found in series.json
@@ -735,6 +813,57 @@ mod tests {
 
         let normal = series.iter().find(|s| s.series.title == "Normal Series").unwrap();
         assert!(!normal.series.is_hidden);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_recursive_category_and_nested_hidden_scan() {
+        let root = std::env::temp_dir().join(format!("dewey_category_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 1. Manga/Action/Solo_Leveling
+        let s1 = root.join("Manga").join("Action").join("Solo_Leveling");
+        std::fs::create_dir_all(&s1).unwrap();
+        std::fs::write(s1.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        // 2. Manhwa/Comedy/Return_Hero
+        let s2 = root.join("Manhwa").join("Comedy").join("Return_Hero");
+        std::fs::create_dir_all(&s2).unwrap();
+        std::fs::write(s2.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        // 3. .Other/Manga/Action/Secret_Manga (Nested hidden)
+        let s3 = root.join(".Other").join("Manga").join("Action").join("Secret_Manga");
+        std::fs::create_dir_all(&s3).unwrap();
+        std::fs::write(s3.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        // 4. Flat top-level series
+        let s4 = root.join("Top_Level_Series");
+        std::fs::create_dir_all(&s4).unwrap();
+        std::fs::write(s4.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
+
+        assert_eq!(summary.series_found, 4);
+        let series = db.get_all_series().unwrap();
+        assert_eq!(series.len(), 4);
+
+        let solo = series.iter().find(|s| s.series.title == "Solo Leveling").unwrap();
+        assert_eq!(solo.series.category.as_deref(), Some("Manga/Action"));
+        assert!(!solo.series.is_hidden);
+
+        let hero = series.iter().find(|s| s.series.title == "Return Hero").unwrap();
+        assert_eq!(hero.series.category.as_deref(), Some("Manhwa/Comedy"));
+        assert!(!hero.series.is_hidden);
+
+        let secret = series.iter().find(|s| s.series.title == "Secret Manga").unwrap();
+        assert_eq!(secret.series.category.as_deref(), Some("Manga/Action"));
+        assert!(secret.series.is_hidden);
+
+        let top = series.iter().find(|s| s.series.title == "Top Level Series").unwrap();
+        assert_eq!(top.series.category.as_deref(), None);
+        assert!(!top.series.is_hidden);
 
         let _ = std::fs::remove_dir_all(&root);
     }

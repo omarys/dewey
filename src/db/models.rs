@@ -13,6 +13,7 @@ pub struct Series {
     pub metadata_json: Option<String>,
     pub reading_mode: Option<String>,
     pub is_hidden: bool,
+    pub category: Option<String>,
 }
 
 impl Series {

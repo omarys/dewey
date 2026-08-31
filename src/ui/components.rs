@@ -150,6 +150,12 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
                     Span::raw("")
                 };
 
+                let category_badge = if let Some(cat) = &s.series.category {
+                    Span::styled(format!(" [{}]", cat), Style::default().fg(theme.accent_alt))
+                } else {
+                    Span::raw("")
+                };
+
                 let read_indicator = if let Some(last_ch) = s.stats.latest_read_chapter {
                     Span::styled(
                         format!("Ch.{:.0} ", last_ch),
@@ -187,6 +193,7 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
                             Style::default().fg(theme.fg)
                         },
                     ),
+                    category_badge,
                     hidden_badge,
                     read_indicator,
                     Span::styled(
@@ -385,7 +392,12 @@ pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) 
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Author:    ", Style::default().fg(theme.muted_fg)),
+                Span::styled("Category:  ", Style::default().fg(theme.muted_fg)),
+                Span::styled(
+                    s.series.category.as_deref().unwrap_or("Uncategorized"),
+                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("   Author: ", Style::default().fg(theme.muted_fg)),
                 Span::styled(meta_author, Style::default().fg(theme.fg)),
                 Span::styled("   Genres: ", Style::default().fg(theme.muted_fg)),
                 Span::styled(meta_genres, Style::default().fg(theme.accent_alt)),
@@ -612,10 +624,11 @@ pub fn render_action_bar(
             ("⏭ Next", AppAction::FetchNext),
             ("🔍 Find", AppAction::Search),
             ("⚡ Filter", AppAction::Filter),
-            ("👁 Tag", AppAction::ToggleHidden),
+            ("🏷 Move", AppAction::TagCategory),
         ];
 
         let row2_actions = [
+            ("👁 Hide", AppAction::ToggleHidden),
             ("🔄 Mode", AppAction::Mode),
             ("✓ Mark", AppAction::MarkRead),
             ("📁 Scan", AppAction::Scan),
@@ -658,7 +671,8 @@ pub fn render_action_bar(
             ("⏭ Next", AppAction::FetchNext),
             ("🔍 Find", AppAction::Search),
             ("⚡ Filter", AppAction::Filter),
-            ("👁 Tag", AppAction::ToggleHidden),
+            ("🏷 Move", AppAction::TagCategory),
+            ("👁 Hide", AppAction::ToggleHidden),
             ("🔄 Mode", AppAction::Mode),
             ("✓ Mark", AppAction::MarkRead),
             ("📁 Scan", AppAction::Scan),
@@ -702,6 +716,7 @@ fn action_key(action: AppAction) -> &'static str {
         AppAction::SwitchPane => "Tab",
         AppAction::Search => "/",
         AppAction::Filter => "f",
+        AppAction::TagCategory => "t",
         AppAction::ToggleHidden => "H",
         AppAction::Quit => "q",
     }
@@ -742,7 +757,14 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Tag Hidden  ", Style::default().fg(theme.fg)),
+        Span::styled("Hide  ", Style::default().fg(theme.fg)),
+        Span::styled(
+            " [t] ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Move/Tag  ", Style::default().fg(theme.fg)),
         Span::styled(
             " [Enter] ",
             Style::default()
@@ -835,6 +857,13 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Cycle status filter (All → Unread → Ongoing → Completed)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  t                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Tag / move series into category folder (e.g. Manga/Action)"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -964,6 +993,80 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
         .block(block)
         .alignment(Alignment::Left);
     f.render_widget(p, area);
+}
+
+pub fn render_category_modal(f: &mut Frame, app: &App, theme: &Theme) {
+    let area = centered_rect(65, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Input box
+            Constraint::Min(5),    // Preset categories list
+            Constraint::Length(3), // Footer hints
+        ])
+        .split(area);
+
+    let series_title = app
+        .current_series()
+        .map(|s| s.series.title.as_str())
+        .unwrap_or("Selected Series");
+
+    // 1. Text input for category
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.active_border())
+        .title(format!(" 🏷 Move / Tag [{}] Category ", series_title));
+
+    let input_p = Paragraph::new(Line::from(vec![
+        Span::styled(" Category: ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}_", app.category_input),
+            Style::default().fg(theme.highlight_fg).add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(input_block)
+    .style(Style::default().bg(theme.highlight_bg));
+    f.render_widget(input_p, chunks[0]);
+
+    // 2. Preset / Available category list
+    let items: Vec<ListItem> = app
+        .available_categories
+        .iter()
+        .enumerate()
+        .map(|(idx, cat)| {
+            let is_sel = idx == app.category_selected_idx;
+            let prefix = if is_sel { " ▶ " } else { "   " };
+            let style = if is_sel {
+                Style::default()
+                    .fg(theme.highlight_fg)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            ListItem::new(format!("{}{}", prefix, cat)).style(style)
+        })
+        .collect();
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.inactive_border())
+        .title(" Available / Suggested Categories (↑/↓ to choose, or type custom) ");
+
+    let list = List::new(items).block(list_block);
+    f.render_widget(list, chunks[1]);
+
+    // 3. Footer hints
+    let hints = Paragraph::new(
+        " [Enter: Confirm & Move Folder]   [Esc: Cancel]   [Supports nesting like 'Manga/Action'] ",
+    )
+    .alignment(Alignment::Center)
+    .style(Style::default().fg(theme.muted_fg));
+    f.render_widget(hints, chunks[2]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

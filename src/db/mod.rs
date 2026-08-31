@@ -99,6 +99,7 @@ impl Database {
             "ALTER TABLE series ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        let _ = conn.execute("ALTER TABLE series ADD COLUMN category TEXT", []);
         let _ = conn.execute("ALTER TABLE chapters ADD COLUMN fetch_url TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path)",
@@ -123,7 +124,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT
-                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json, s.reading_mode, s.is_hidden,
+                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json, s.reading_mode, s.is_hidden, s.category,
                 COUNT(c.id) AS total_count,
                 SUM(CASE WHEN c.file_path IS NOT NULL AND c.file_path != '' THEN 1 ELSE 0 END) AS downloaded_count,
                 SUM(CASE WHEN p.is_completed = 1 THEN 1 ELSE 0 END) AS completed_count,
@@ -149,13 +150,14 @@ impl Database {
                     metadata_json: row.get(6)?,
                     reading_mode: row.get(7)?,
                     is_hidden: is_hidden_int != 0,
+                    category: row.get(9)?,
                 };
 
-                let total_count: i64 = row.get(9).unwrap_or(0);
-                let downloaded_count: i64 = row.get(10).unwrap_or(0);
-                let completed_count: i64 = row.get(11).unwrap_or(0);
-                let latest_read_chap: Option<f64> = row.get(12)?;
-                let latest_read_time_str: Option<String> = row.get(13)?;
+                let total_count: i64 = row.get(10).unwrap_or(0);
+                let downloaded_count: i64 = row.get(11).unwrap_or(0);
+                let completed_count: i64 = row.get(12).unwrap_or(0);
+                let latest_read_chap: Option<f64> = row.get(13)?;
+                let latest_read_time_str: Option<String> = row.get(14)?;
 
                 let last_read_at = latest_read_time_str.and_then(|s| {
                     DateTime::parse_from_rfc3339(&s)
@@ -472,12 +474,43 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_series_category(&self, series_id: i64, category: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE series SET category = ?1 WHERE id = ?2",
+            params![category, series_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_categories(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT category FROM series WHERE category IS NOT NULL AND category != '' ORDER BY category ASC",
+        )?;
+        let categories = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(categories)
+    }
+
     pub fn rename_series_directory(
         &self,
         series_id: i64,
         old_dir: &Path,
         new_dir: &Path,
         is_hidden: bool,
+    ) -> Result<()> {
+        self.rename_series_directory_with_category(series_id, old_dir, new_dir, is_hidden, None)
+    }
+
+    pub fn rename_series_directory_with_category(
+        &self,
+        series_id: i64,
+        old_dir: &Path,
+        new_dir: &Path,
+        is_hidden: bool,
+        new_category: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let old_dir_str = old_dir.to_string_lossy().to_string();
@@ -523,18 +556,25 @@ impl Database {
             }
         }
 
-        // 3. Update is_hidden flag
-        conn.execute(
-            "UPDATE series SET is_hidden = ?1 WHERE id = ?2",
-            params![if is_hidden { 1 } else { 0 }, series_id],
-        )?;
+        // 3. Update is_hidden flag and optionally category
+        if let Some(cat) = new_category {
+            conn.execute(
+                "UPDATE series SET is_hidden = ?1, category = ?2 WHERE id = ?3",
+                params![if is_hidden { 1 } else { 0 }, cat, series_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE series SET is_hidden = ?1 WHERE id = ?2",
+                params![if is_hidden { 1 } else { 0 }, series_id],
+            )?;
+        }
 
         Ok(())
     }
 
     pub fn insert_or_get_series(&self, title: &str) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        self.insert_or_get_series_inner(&conn, title, None, false)
+        self.insert_or_get_series_inner(&conn, title, None, false, None)
     }
 
     pub fn insert_or_get_series_with_cover(
@@ -543,7 +583,7 @@ impl Database {
         cover_path: Option<&str>,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        self.insert_or_get_series_inner(&conn, title, cover_path, false)
+        self.insert_or_get_series_inner(&conn, title, cover_path, false, None)
     }
 
     pub fn insert_or_get_series_with_cover_and_hidden(
@@ -553,7 +593,18 @@ impl Database {
         is_hidden: bool,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        self.insert_or_get_series_inner(&conn, title, cover_path, is_hidden)
+        self.insert_or_get_series_inner(&conn, title, cover_path, is_hidden, None)
+    }
+
+    pub fn insert_or_get_series_full(
+        &self,
+        title: &str,
+        cover_path: Option<&str>,
+        is_hidden: bool,
+        category: Option<&str>,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        self.insert_or_get_series_inner(&conn, title, cover_path, is_hidden, category)
     }
 
     fn insert_or_get_series_inner(
@@ -562,20 +613,27 @@ impl Database {
         title: &str,
         cover_path: Option<&str>,
         is_hidden: bool,
+        category: Option<&str>,
     ) -> Result<i64> {
-        let existing: Option<(i64, Option<String>)> = conn
+        let existing: Option<(i64, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT id, cover_path FROM series WHERE title = ?1",
+                "SELECT id, cover_path, category FROM series WHERE title = ?1",
                 params![title],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .ok();
 
-        if let Some((id, existing_cover)) = existing {
+        if let Some((id, existing_cover, existing_cat)) = existing {
             if existing_cover.is_none() && cover_path.is_some() {
                 let _ = conn.execute(
                     "UPDATE series SET cover_path = ?1 WHERE id = ?2",
                     params![cover_path, id],
+                );
+            }
+            if existing_cat.is_none() && category.is_some() {
+                let _ = conn.execute(
+                    "UPDATE series SET category = ?1 WHERE id = ?2",
+                    params![category, id],
                 );
             }
             let _ = conn.execute(
@@ -585,8 +643,8 @@ impl Database {
             Ok(id)
         } else {
             conn.execute(
-                "INSERT INTO series (title, sort_title, status, cover_path, is_hidden) VALUES (?1, ?1, 'Ongoing', ?2, ?3)",
-                params![title, cover_path, if is_hidden { 1 } else { 0 }],
+                "INSERT INTO series (title, sort_title, status, cover_path, is_hidden, category) VALUES (?1, ?1, 'Ongoing', ?2, ?3, ?4)",
+                params![title, cover_path, if is_hidden { 1 } else { 0 }, category],
             )?;
             Ok(conn.last_insert_rowid())
         }
@@ -597,7 +655,8 @@ impl Database {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?;
 
         if count == 0 {
-            let series_id = self.insert_or_get_series_inner(&conn, "Solo Leveling", None, false)?;
+            let series_id =
+                self.insert_or_get_series_inner(&conn, "Solo Leveling", None, false, Some("Manhwa/Action"))?;
             conn.execute(
                 "UPDATE series SET
                     sort_title = 'Solo Leveling',
@@ -632,7 +691,8 @@ impl Database {
                 )?;
             }
 
-            let s2_id = self.insert_or_get_series_inner(&conn, "Chainsaw Man", None, false)?;
+            let s2_id =
+                self.insert_or_get_series_inner(&conn, "Chainsaw Man", None, false, Some("Manga/Action"))?;
             conn.execute(
                 "UPDATE series SET
                     sort_title = 'Chainsaw Man',

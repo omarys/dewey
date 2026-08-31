@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS series (
     fetch_url TEXT,
     metadata_json TEXT,
     reading_mode TEXT DEFAULT 'webtoon',
-    is_hidden INTEGER NOT NULL DEFAULT 0
+    is_hidden INTEGER NOT NULL DEFAULT 0,
+    category TEXT
 );
 
 CREATE TABLE IF NOT EXISTS chapters (

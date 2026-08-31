@@ -26,6 +26,7 @@ pub enum InputMode {
     #[default]
     Normal,
     SearchInput,
+    CategoryPicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -74,6 +75,7 @@ pub enum AppAction {
     Search,
     Filter,
     ToggleHidden,
+    TagCategory,
     Quit,
 }
 
@@ -105,6 +107,10 @@ pub struct App {
     pub filter_mode: FilterMode,
     pub filtered_indices: Vec<usize>,
     pub show_hidden: bool,
+
+    pub available_categories: Vec<String>,
+    pub category_input: String,
+    pub category_selected_idx: usize,
 
     pub active_pane: ActivePane,
     pub download_jobs: Vec<DownloadJob>,
@@ -154,6 +160,9 @@ impl App {
             filter_mode: FilterMode::All,
             filtered_indices: Vec::new(),
             show_hidden: false,
+            available_categories: Vec::new(),
+            category_input: String::new(),
+            category_selected_idx: 0,
             active_pane: ActivePane::SeriesList,
             download_jobs: Vec::new(),
             tick_count: 0,
@@ -291,9 +300,13 @@ impl App {
                     .as_deref()
                     .unwrap_or("")
                     .to_lowercase();
+                let cat = s.series.category.as_deref().unwrap_or("").to_lowercase();
 
                 query_tokens.iter().all(|&token| {
-                    title.contains(token) || sort_title.contains(token) || meta.contains(token)
+                    title.contains(token)
+                        || sort_title.contains(token)
+                        || meta.contains(token)
+                        || cat.contains(token)
                 })
             })
             .map(|(i, _)| i)
@@ -310,6 +323,193 @@ impl App {
         }
 
         let _ = self.reload_chapters();
+    }
+
+    pub fn open_category_modal(&mut self) {
+        if self.current_series().is_none() {
+            self.set_toast("No series selected", true);
+            return;
+        }
+
+        let mut cats = vec![
+            "Action".to_string(),
+            "Comedy".to_string(),
+            "Romance".to_string(),
+            "Manga".to_string(),
+            "Manga/Action".to_string(),
+            "Manga/Comedy".to_string(),
+            "Manga/Romance".to_string(),
+            "Manhwa".to_string(),
+            "Manhwa/Action".to_string(),
+            "Manhwa/Comedy".to_string(),
+            "Manhwa/Romance".to_string(),
+            "Uncategorized".to_string(),
+        ];
+
+        if let Ok(db_cats) = self.db.get_all_categories() {
+            for c in db_cats {
+                if !cats.contains(&c) {
+                    cats.push(c);
+                }
+            }
+        }
+
+        self.available_categories = cats;
+        self.category_input = self
+            .current_series()
+            .and_then(|s| s.series.category.clone())
+            .unwrap_or_default();
+        self.category_selected_idx = 0;
+        self.input_mode = InputMode::CategoryPicker;
+    }
+
+    pub fn close_category_modal(&mut self) {
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn category_modal_select_next(&mut self) {
+        if !self.available_categories.is_empty() {
+            self.category_selected_idx =
+                (self.category_selected_idx + 1) % self.available_categories.len();
+            self.category_input = self.available_categories[self.category_selected_idx].clone();
+        }
+    }
+
+    pub fn category_modal_select_prev(&mut self) {
+        if !self.available_categories.is_empty() {
+            if self.category_selected_idx == 0 {
+                self.category_selected_idx = self.available_categories.len() - 1;
+            } else {
+                self.category_selected_idx -= 1;
+            }
+            self.category_input = self.available_categories[self.category_selected_idx].clone();
+        }
+    }
+
+    pub fn category_modal_push_char(&mut self, c: char) {
+        self.category_input.push(c);
+    }
+
+    pub fn category_modal_pop_char(&mut self) {
+        self.category_input.pop();
+    }
+
+    pub fn confirm_category_selection(&mut self) -> Result<()> {
+        let cat = self.category_input.trim().to_string();
+        self.close_category_modal();
+        self.apply_category_to_selected(&cat)
+    }
+
+    pub fn apply_category_to_selected(&mut self, new_category: &str) -> Result<()> {
+        let current = match self.current_series() {
+            Some(s) => s.clone(),
+            None => {
+                self.set_toast("No series selected", true);
+                return Ok(());
+            }
+        };
+
+        let series_id = current.series.id;
+        let title = &current.series.title;
+        let is_hidden = current.series.is_hidden;
+
+        // 1. Locate current series directory
+        let chapters = self.db.get_chapters_for_series(series_id)?;
+        let existing_file_dir = chapters
+            .iter()
+            .find_map(|c| c.chapter.file_path.as_deref())
+            .map(Path::new)
+            .filter(|p| p.exists())
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+        let cover_dir = current
+            .series
+            .cover_path
+            .as_deref()
+            .map(Path::new)
+            .filter(|p| p.exists())
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+        let folder_name = existing_file_dir
+            .as_ref()
+            .or(cover_dir.as_ref())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                let safe_title = title.replace(' ', "_");
+                if is_hidden {
+                    format!(".{}", safe_title)
+                } else {
+                    safe_title
+                }
+            });
+
+        let current_dir = existing_file_dir.or(cover_dir);
+
+        // 2. Compute target parent directory
+        let clean_cat = new_category.trim().trim_matches('/');
+        let is_uncat = clean_cat.is_empty() || clean_cat.eq_ignore_ascii_case("uncategorized");
+
+        let target_parent = if is_uncat {
+            if is_hidden {
+                self.config.library_dir.join(".Other")
+            } else {
+                self.config.library_dir.clone()
+            }
+        } else if is_hidden {
+            self.config.library_dir.join(".Other").join(clean_cat)
+        } else {
+            self.config.library_dir.join(clean_cat)
+        };
+
+        let target_dir = target_parent.join(&folder_name);
+        let cat_value = if is_uncat { None } else { Some(clean_cat) };
+
+        if let Some(src_dir) = &current_dir {
+            if src_dir.exists() && src_dir != &target_dir {
+                if target_dir.exists() {
+                    self.set_toast(
+                        format!("Target directory '{:?}' already exists", target_dir),
+                        true,
+                    );
+                    return Ok(());
+                }
+                std::fs::create_dir_all(&target_parent).with_context(|| {
+                    format!("Failed to create directory {:?}", target_parent)
+                })?;
+                std::fs::rename(src_dir, &target_dir)
+                    .with_context(|| format!("Failed to move {:?} to {:?}", src_dir, target_dir))?;
+
+                // Clean up old parent directory if empty
+                if let Some(old_parent) = src_dir.parent() {
+                    if old_parent != self.config.library_dir
+                        && old_parent != self.config.library_dir.join(".Other")
+                    {
+                        let _ = std::fs::remove_dir(old_parent);
+                    }
+                }
+
+                self.db.rename_series_directory_with_category(
+                    series_id,
+                    src_dir,
+                    &target_dir,
+                    is_hidden,
+                    cat_value,
+                )?;
+            } else {
+                self.db.update_series_category(series_id, cat_value)?;
+            }
+        } else {
+            self.db.update_series_category(series_id, cat_value)?;
+        }
+
+        self.reload_series()?;
+        let cat_label = cat_value.unwrap_or("Uncategorized");
+        self.set_toast(
+            format!("Series '{}' moved to [{}]", title, cat_label),
+            false,
+        );
+        Ok(())
     }
 
     pub fn toggle_show_hidden(&mut self) {
@@ -1266,6 +1466,62 @@ mod tests {
         assert!(series_dir.exists());
         assert!(!hidden_dir.exists());
         assert!(!app.series_list[0].series.is_hidden);
+
+        let _ = std::fs::remove_dir_all(&temp_lib);
+    }
+
+    #[test]
+    fn test_apply_category_moves_directory_and_updates_db() {
+        let temp_lib = std::env::temp_dir().join(format!("dewey_app_cat_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_lib);
+        std::fs::create_dir_all(&temp_lib).unwrap();
+
+        let initial_series_dir = temp_lib.join("Solo_Leveling");
+        std::fs::create_dir_all(&initial_series_dir).unwrap();
+        let ch_path = initial_series_dir.join("c001.cbz");
+        std::fs::write(&ch_path, b"dummy").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let series_id = db
+            .insert_or_get_series_full("Solo Leveling", None, false, None)
+            .unwrap();
+        db.record_chapter_download(series_id, 1.0, ch_path.to_str().unwrap(), Some(10), None)
+            .unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut cfg = Config::default();
+        cfg.library_dir = temp_lib.clone();
+        cfg.auto_scan_on_startup = false;
+        let mut app = App::new(cfg, db, tx).unwrap();
+
+        assert_eq!(app.series_list.len(), 1);
+        assert_eq!(app.series_list[0].series.category, None);
+        assert!(initial_series_dir.exists());
+
+        // 1. Move to "Manhwa/Action"
+        app.apply_category_to_selected("Manhwa/Action").unwrap();
+
+        let target_dir = temp_lib.join("Manhwa").join("Action").join("Solo_Leveling");
+        assert!(target_dir.exists());
+        assert!(!initial_series_dir.exists());
+
+        let series = app.db.get_all_series().unwrap();
+        assert_eq!(series[0].series.category.as_deref(), Some("Manhwa/Action"));
+
+        let chapters = app.db.get_chapters_for_series(series_id).unwrap();
+        assert_eq!(
+            chapters[0].chapter.file_path.as_deref(),
+            Some(target_dir.join("c001.cbz").to_str().unwrap())
+        );
+
+        // 2. Search matches category "action"
+        app.search_query = "action".to_string();
+        app.apply_filter();
+        assert_eq!(app.filtered_indices.len(), 1);
+
+        app.search_query = "romance".to_string();
+        app.apply_filter();
+        assert_eq!(app.filtered_indices.len(), 0);
 
         let _ = std::fs::remove_dir_all(&temp_lib);
     }
