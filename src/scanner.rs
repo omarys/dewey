@@ -132,6 +132,9 @@ impl LibraryScanner {
             total
         });
 
+        // Prune stale series or chapters that were erroneously indexed from category folders
+        Self::cleanup_stale_records(db, &series_dirs)?;
+
         info!(
             series = summary.series_found,
             chapters = summary.chapters_found,
@@ -140,6 +143,56 @@ impl LibraryScanner {
         );
 
         Ok(summary)
+    }
+
+    /// Cleans up any database series or chapters that point to non-existent files or category folders.
+    pub fn cleanup_stale_records(db: &Database, discovered_dirs: &[PathBuf]) -> Result<usize> {
+        let all_series = db.get_all_series()?;
+        let mut removed = 0;
+
+        for s in all_series {
+            let chapters = db.get_chapters_for_series(s.series.id)?;
+
+            // Remove any chapter pointing to a directory that is not a valid image chapter or doesn't exist
+            for c in &chapters {
+                if let Some(fp) = c.chapter.file_path.as_deref() {
+                    let p = Path::new(fp);
+                    if !p.exists() || (p.is_dir() && !Self::is_leaf_image_chapter(p)) {
+                        let _ = db.delete_chapter(c.chapter.id);
+                    }
+                }
+            }
+
+            // Check remaining valid chapters
+            let remaining_chapters = db.get_chapters_for_series(s.series.id)?;
+            let has_valid_file = remaining_chapters.iter().any(|c| {
+                if let Some(fp) = c.chapter.file_path.as_deref() {
+                    let p = Path::new(fp);
+                    p.exists() && (Self::is_chapter_file(p) || Self::is_leaf_image_chapter(p))
+                } else {
+                    false
+                }
+            });
+
+            // If series has no valid downloaded chapter files and its title does not match any discovered series dir
+            if !has_valid_file {
+                let matches_discovered = discovered_dirs.iter().any(|d| {
+                    let raw_name = d
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let clean_name = raw_name.trim_start_matches('.').replace('_', " ");
+                    clean_name.eq_ignore_ascii_case(&s.series.title)
+                });
+
+                if !matches_discovered {
+                    let _ = db.delete_series(s.series.id);
+                    removed += 1;
+                }
+            }
+        }
+
+        Ok(removed)
     }
 
     /// Recursively discovers series directories under the root library directory.
@@ -151,6 +204,7 @@ impl LibraryScanner {
             if let Ok(entries) = fs::read_dir(&current_dir) {
                 let mut subdirs = Vec::new();
                 let mut has_direct_archives_or_meta = false;
+                let mut has_direct_images = false;
 
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -160,24 +214,27 @@ impl LibraryScanner {
                         }
                     } else if Self::is_chapter_file(&p) || Self::is_series_meta_file(&p) {
                         has_direct_archives_or_meta = true;
+                    } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        let l = ext.to_lowercase();
+                        if matches!(l.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") {
+                            has_direct_images = true;
+                        }
                     }
                 }
 
-                // Check if subdirectories look like chapter folders (e.g. "Chapter 1", "c001")
+                // Check if all subdirectories are actual chapter folders (leaf folders containing images only)
                 let has_chapter_subdirs = !subdirs.is_empty()
-                    && subdirs
-                        .iter()
-                        .any(|d| Self::parse_chapter_number(d).is_some());
+                    && subdirs.iter().all(|d| Self::is_leaf_image_chapter(d));
 
-                if current_dir != library_dir && (has_direct_archives_or_meta || has_chapter_subdirs)
+                if current_dir != library_dir
+                    && (has_direct_archives_or_meta
+                        || has_chapter_subdirs
+                        || (has_direct_images && subdirs.is_empty()))
                 {
                     // This directory is a Series container! Do not recurse into its chapter contents.
                     result.push(current_dir);
-                } else if current_dir != library_dir && subdirs.is_empty() {
-                    // Leaf folder that may contain unpacked image pages
-                    result.push(current_dir);
                 } else {
-                    // Category / organization folder: recurse into subdirectories
+                    // Category / organization folder (or root): recurse into subdirectories
                     for subdir in subdirs {
                         stack.push(subdir);
                     }
@@ -187,6 +244,34 @@ impl LibraryScanner {
 
         result.sort();
         result
+    }
+
+    /// Returns true if a directory contains image files directly and has NO subdirectories of its own.
+    pub fn is_leaf_image_chapter(path: &Path) -> bool {
+        if !path.is_dir() || Self::is_special_dir(path) {
+            return false;
+        }
+        if let Ok(entries) = fs::read_dir(path) {
+            let mut has_subdirs = false;
+            let mut has_images = false;
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if !Self::is_special_dir(&p) {
+                        has_subdirs = true;
+                        break;
+                    }
+                } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    let l = ext.to_lowercase();
+                    if matches!(l.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") {
+                        has_images = true;
+                    }
+                }
+            }
+            !has_subdirs && has_images
+        } else {
+            false
+        }
     }
 
     fn is_series_meta_file(path: &Path) -> bool {
@@ -298,7 +383,7 @@ impl LibraryScanner {
         let existing_map = db.get_existing_chapters_by_path(series_id)?;
         let mut chapter_paths: Vec<PathBuf> = entries
             .iter()
-            .filter(|p| Self::is_chapter_file(p) || (p.is_dir() && !Self::is_special_dir(p)))
+            .filter(|p| Self::is_chapter_file(p) || Self::is_leaf_image_chapter(p))
             .cloned()
             .collect();
 
@@ -864,6 +949,61 @@ mod tests {
         let top = series.iter().find(|s| s.series.title == "Top Level Series").unwrap();
         assert_eq!(top.series.category.as_deref(), None);
         assert!(!top.series.is_hidden);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_category_folders_with_subfolders_never_treated_as_series() {
+        let root = std::env::temp_dir().join(format!("dewey_cat_structure_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Structure:
+        // root/
+        //   Manga/
+        //     Action/
+        //       Solo_Leveling/
+        //         c001.cbz
+        //     Comedy/
+        //       One_Punch/
+        //         c001.cbz
+        //     Romance/
+        //     Uncategorized/
+        //   Manhwa/
+        //     Action/
+        //       Tower_Of_God/
+        //         c001.cbz
+
+        let manga_action = root.join("Manga").join("Action").join("Solo_Leveling");
+        let manga_comedy = root.join("Manga").join("Comedy").join("One_Punch");
+        let _ = std::fs::create_dir_all(root.join("Manga").join("Romance"));
+        let _ = std::fs::create_dir_all(root.join("Manga").join("Uncategorized"));
+        let manhwa_action = root.join("Manhwa").join("Action").join("Tower_Of_God");
+
+        std::fs::create_dir_all(&manga_action).unwrap();
+        std::fs::create_dir_all(&manga_comedy).unwrap();
+        std::fs::create_dir_all(&manhwa_action).unwrap();
+
+        std::fs::write(manga_action.join("c001.cbz"), b"fake_cbz").unwrap();
+        std::fs::write(manga_comedy.join("c001.cbz"), b"fake_cbz").unwrap();
+        std::fs::write(manhwa_action.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
+
+        // Exactly 3 series should be found (Solo Leveling, One Punch, Tower Of God).
+        // "Manga" and "Manhwa" and "Action" and "Comedy" must NOT be treated as series!
+        assert_eq!(summary.series_found, 3);
+        let series = db.get_all_series().unwrap();
+        assert_eq!(series.len(), 3);
+
+        let titles: Vec<String> = series.into_iter().map(|s| s.series.title).collect();
+        assert!(titles.contains(&"Solo Leveling".to_string()));
+        assert!(titles.contains(&"One Punch".to_string()));
+        assert!(titles.contains(&"Tower Of God".to_string()));
+        assert!(!titles.contains(&"Manga".to_string()));
+        assert!(!titles.contains(&"Manhwa".to_string()));
+        assert!(!titles.contains(&"Action".to_string()));
 
         let _ = std::fs::remove_dir_all(&root);
     }

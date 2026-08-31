@@ -281,6 +281,13 @@ impl Database {
         Ok(())
     }
 
+    /// Removes a single chapter and its progress record.
+    pub fn delete_chapter(&self, chapter_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM chapters WHERE id = ?1", params![chapter_id])?;
+        Ok(())
+    }
+
     /// Wipes the on-disk SQLite database so the next open starts fresh.
     /// Also removes the WAL and SHM sidecar files SQLite creates alongside it.
     pub fn reset(path: &Path) -> Result<()> {
