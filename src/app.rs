@@ -573,12 +573,31 @@ impl App {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| self.config.library_dir.clone());
 
-        let (new_dir, new_is_hidden) = if folder_name.starts_with('.') {
+        let rel_path = series_dir
+            .strip_prefix(&self.config.library_dir)
+            .unwrap_or(&series_dir);
+        let in_dot_other = rel_path.starts_with(".Other");
+        let starts_with_dot = folder_name.starts_with('.');
+
+        let (new_dir, new_is_hidden) = if in_dot_other {
+            // Move out of .Other into normal library hierarchy
+            let sub_rel = rel_path.strip_prefix(".Other").unwrap_or(rel_path);
+            let clean_folder = folder_name.trim_start_matches('.');
+            let target_parent_rel = sub_rel.parent().unwrap_or(Path::new(""));
+            let target_parent = self.config.library_dir.join(target_parent_rel);
+            (target_parent.join(clean_folder), false)
+        } else if starts_with_dot {
+            // Dot-prefixed series folder at root or subfolder -> remove dot prefix
             let clean_name = folder_name.trim_start_matches('.');
             (parent_dir.join(clean_name), false)
         } else {
-            let dot_name = format!(".{}", folder_name);
-            (parent_dir.join(dot_name), true)
+            // Unhidden -> move into .Other folder structure
+            let target_parent = self
+                .config
+                .library_dir
+                .join(".Other")
+                .join(rel_path.parent().unwrap_or(Path::new("")));
+            (target_parent.join(&folder_name), true)
         };
 
         if series_dir.exists() {
@@ -587,8 +606,23 @@ impl App {
                 self.set_toast(msg, true);
                 return Ok(());
             }
+            if let Some(target_parent) = new_dir.parent() {
+                std::fs::create_dir_all(target_parent).with_context(|| {
+                    format!("Failed to create directory {:?}", target_parent)
+                })?;
+            }
             std::fs::rename(&series_dir, &new_dir)
                 .with_context(|| format!("Failed to rename {:?} to {:?}", series_dir, new_dir))?;
+
+            // Clean up old parent directory if empty
+            if let Some(old_parent) = series_dir.parent() {
+                if old_parent != self.config.library_dir
+                    && old_parent != self.config.library_dir.join(".Other")
+                {
+                    let _ = std::fs::remove_dir(old_parent);
+                }
+            }
+
             self.db
                 .rename_series_directory(series_id, &series_dir, &new_dir, new_is_hidden)?;
         } else {
@@ -1449,7 +1483,7 @@ mod tests {
 
         // Toggle to hidden
         app.toggle_selected_series_hidden().unwrap();
-        let hidden_dir = temp_lib.join(".My_Manga");
+        let hidden_dir = temp_lib.join(".Other").join("My_Manga");
         assert!(hidden_dir.exists());
         assert!(!series_dir.exists());
         assert!(app.series_list[0].series.is_hidden);
