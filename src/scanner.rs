@@ -150,45 +150,55 @@ impl LibraryScanner {
         let all_series = db.get_all_series()?;
         let mut removed = 0;
 
+        let mut discovered_map: std::collections::HashMap<PathBuf, String> =
+            std::collections::HashMap::new();
+        for d in discovered_dirs {
+            let entries: Vec<PathBuf> = fs::read_dir(d)
+                .map(|rd| rd.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            let series_meta = Self::read_series_json_from_entries(&entries);
+            let raw_name = d
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown_Series".to_string());
+            let folder_name = raw_name.trim_start_matches('.').replace('_', " ");
+            let title = series_meta.and_then(|m| m.name).unwrap_or(folder_name);
+            discovered_map.insert(d.clone(), title);
+        }
+
         for s in all_series {
             let chapters = db.get_chapters_for_series(s.series.id)?;
 
-            // Remove any chapter pointing to a directory that is not a valid image chapter or doesn't exist
             for c in &chapters {
                 if let Some(fp) = c.chapter.file_path.as_deref() {
                     let p = Path::new(fp);
-                    if !p.exists() || (p.is_dir() && !Self::is_leaf_image_chapter(p)) {
+                    let is_invalid_dir = p.is_dir() && !Self::is_leaf_image_chapter(p);
+                    let mut belongs_to_other_series = false;
+
+                    for (discovered_dir, title) in &discovered_map {
+                        if p.starts_with(discovered_dir)
+                            && !title.eq_ignore_ascii_case(&s.series.title)
+                        {
+                            belongs_to_other_series = true;
+                            break;
+                        }
+                    }
+
+                    if !p.exists() || is_invalid_dir || belongs_to_other_series {
                         let _ = db.delete_chapter(c.chapter.id);
                     }
                 }
             }
 
-            // Check remaining valid chapters
-            let remaining_chapters = db.get_chapters_for_series(s.series.id)?;
-            let has_valid_file = remaining_chapters.iter().any(|c| {
-                if let Some(fp) = c.chapter.file_path.as_deref() {
-                    let p = Path::new(fp);
-                    p.exists() && (Self::is_chapter_file(p) || Self::is_leaf_image_chapter(p))
-                } else {
-                    false
-                }
-            });
+            // Check if series has any remaining chapters or fetch_url
+            let remaining = db.get_chapters_for_series(s.series.id)?;
+            let is_discovered = discovered_map
+                .values()
+                .any(|t| t.eq_ignore_ascii_case(&s.series.title));
 
-            // If series has no valid downloaded chapter files and its title does not match any discovered series dir
-            if !has_valid_file {
-                let matches_discovered = discovered_dirs.iter().any(|d| {
-                    let raw_name = d
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let clean_name = raw_name.trim_start_matches('.').replace('_', " ");
-                    clean_name.eq_ignore_ascii_case(&s.series.title)
-                });
-
-                if !matches_discovered {
-                    let _ = db.delete_series(s.series.id);
-                    removed += 1;
-                }
+            if remaining.is_empty() && s.series.fetch_url.is_none() && !is_discovered {
+                let _ = db.delete_series(s.series.id);
+                removed += 1;
             }
         }
 

@@ -205,7 +205,11 @@ impl App {
             should_quit: false,
         };
 
-        // 1. Instant startup: load existing SQLite database immediately (< 2ms)
+        // 1. Instant startup: clean stale category records and load existing SQLite database immediately (< 2ms)
+        if app.config.library_dir.exists() {
+            let series_dirs = LibraryScanner::find_series_directories(&app.config.library_dir);
+            let _ = LibraryScanner::cleanup_stale_records(&app.db, &series_dirs);
+        }
         app.reload_series()?;
         app.reload_chapters()?;
 
