@@ -742,7 +742,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Style::default().fg(theme.fg),
         ),
         Span::styled(
-            " [^H] ",
+            " [.] ",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -867,10 +867,10 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  Ctrl+h                ",
+                "  .                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Toggle visibility of hidden series (starts with '.')"),
+            Span::raw("Toggle visibility of hidden series / .Other folders"),
         ]),
         Line::from(vec![
             Span::styled(

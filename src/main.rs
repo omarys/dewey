@@ -281,9 +281,6 @@ async fn main() -> Result<()> {
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                 app.should_quit = true;
                             }
-                            (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
-                                app.toggle_show_hidden();
-                            }
                             (KeyCode::Esc, _) => {
                                 app.exit_search_mode(true);
                             }
@@ -336,7 +333,7 @@ async fn main() -> Result<()> {
                         | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                             app.should_quit = true;
                         }
-                        (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+                        (KeyCode::Char('.'), KeyModifiers::NONE) => {
                             app.toggle_show_hidden();
                         }
                         (KeyCode::Char('t'), KeyModifiers::NONE) => {
