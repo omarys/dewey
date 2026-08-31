@@ -621,114 +621,151 @@ pub fn render_action_bar(
 ) {
     app.action_rects.clear();
 
-    if let Some((msg, is_error, _)) = &app.toast {
-        let toast_style = if *is_error {
-            theme.error_badge().add_modifier(Modifier::BOLD)
-        } else {
-            theme.success_badge().add_modifier(Modifier::BOLD)
-        };
-        let p = Paragraph::new(Line::from(vec![
-            Span::styled(format!(" 🔔 {} ", msg), toast_style),
-        ]))
-        .alignment(Alignment::Center)
-        .style(Style::default().bg(theme.bg));
-        f.render_widget(p, area);
-        return;
-    }
-
     if is_portrait && area.height >= 2 {
         let row_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(area);
 
         let row1_actions = [
-            ("📖 Read", AppAction::Open),
-            ("🔍 Find", AppAction::Search),
-            ("⚡ Status", AppAction::Filter),
-            ("📚 Type", AppAction::CycleType),
-            ("👁 Hidden", AppAction::CycleHidden),
-            ("🏷 Move", AppAction::TagCategory),
-            ("🔒 Hide", AppAction::ToggleHidden),
+            ("📖 Read", "↵", AppAction::Open),
+            ("🔍 Find", "/", AppAction::Search),
+            ("⚡ Status", "f", AppAction::Filter),
+            ("📚 Type", "T", AppAction::CycleType),
+            ("👁 Hidden", ".", AppAction::CycleHidden),
+            ("🏷 Move", "t", AppAction::TagCategory),
+            ("🔒 Hide", "H", AppAction::ToggleHidden),
         ];
 
         let row2_actions = [
-            ("⬇ Fetch", AppAction::Fetch),
-            ("📁 Scan", AppAction::Scan),
-            ("✓ Mark", AppAction::MarkRead),
-            ("🔄 Mode", AppAction::Mode),
-            ("❓ Help", AppAction::Help),
-            ("❌ Quit", AppAction::Quit),
+            ("⬇ Fetch", "d", AppAction::Fetch),
+            ("📁 Scan", "s", AppAction::Scan),
+            ("✓ Mark", "m", AppAction::MarkRead),
+            ("🔄 Mode", "M", AppAction::Mode),
+            ("❓ Help", "?", AppAction::Help),
+            ("❌ Quit", "q", AppAction::Quit),
         ];
 
-        for (actions, row_area) in [
+        for (row_idx, (actions, row_area)) in [
             (&row1_actions[..], row_chunks[0]),
             (&row2_actions[..], row_chunks[1]),
-        ] {
-            let n = actions.len() as u16;
-            let cells = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Percentage(100 / n); n as usize])
-                .split(row_area);
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut spans = Vec::new();
+            let mut current_x = row_area.x;
 
-            for (cell, (label, action)) in cells.iter().zip(actions.iter()) {
-                app.action_rects.push((*cell, *action));
-                let key = action_key(*action);
-                let text = format!("{} [{}]", label, key);
-                let fg_color = if *action == AppAction::Quit {
+            for (label, key, action) in *actions {
+                let btn_text = format!(" {} [{}] ", label, key);
+                let btn_len = btn_text.chars().count() as u16;
+
+                let rect = Rect {
+                    x: current_x,
+                    y: row_area.y,
+                    width: btn_len,
+                    height: 1,
+                };
+                app.action_rects.push((rect, *action));
+                current_x += btn_len;
+
+                let fg = if *action == AppAction::Quit {
                     theme.error
                 } else {
                     theme.accent
                 };
-                let p = Paragraph::new(Line::from(vec![Span::styled(
-                    text,
-                    Style::default().fg(fg_color).add_modifier(Modifier::BOLD),
-                )]))
-                .alignment(Alignment::Center)
-                .style(Style::default().bg(theme.highlight_bg));
-                f.render_widget(p, *cell);
+                spans.push(Span::styled(
+                    format!(" {} ", label),
+                    Style::default().fg(fg),
+                ));
+                spans.push(Span::styled(
+                    format!("[{}] ", key),
+                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                ));
             }
+
+            if row_idx == 1 {
+                if let Some((msg, is_error, _)) = &app.toast {
+                    spans.push(Span::raw(" "));
+                    let toast_style = if *is_error {
+                        theme.error_badge().add_modifier(Modifier::BOLD)
+                    } else {
+                        theme.success_badge().add_modifier(Modifier::BOLD)
+                    };
+                    spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
+                }
+            }
+
+            let p = Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(theme.bg));
+            f.render_widget(p, *row_area);
         }
     } else {
         let actions = [
-            ("📖 Read", AppAction::Open),
-            ("🔍 Find", AppAction::Search),
-            ("⚡ Status", AppAction::Filter),
-            ("📚 Type", AppAction::CycleType),
-            ("👁 Hidden", AppAction::CycleHidden),
-            ("🏷 Move", AppAction::TagCategory),
-            ("🔒 Hide", AppAction::ToggleHidden),
-            ("⬇ Fetch", AppAction::Fetch),
-            ("📁 Scan", AppAction::Scan),
-            ("✓ Mark", AppAction::MarkRead),
-            ("🔄 Mode", AppAction::Mode),
-            ("❓ Help", AppAction::Help),
-            ("❌ Quit", AppAction::Quit),
+            ("📖 Read", "↵", AppAction::Open),
+            ("🔍 Find", "/", AppAction::Search),
+            ("⚡ Status", "f", AppAction::Filter),
+            ("📚 Type", "T", AppAction::CycleType),
+            ("👁 Hidden", ".", AppAction::CycleHidden),
+            ("🏷 Move", "t", AppAction::TagCategory),
+            ("🔒 Hide", "H", AppAction::ToggleHidden),
+            ("⬇ Fetch", "d", AppAction::Fetch),
+            ("📁 Scan", "s", AppAction::Scan),
+            ("✓ Mark", "m", AppAction::MarkRead),
+            ("🔄 Mode", "M", AppAction::Mode),
+            ("❓ Help", "?", AppAction::Help),
+            ("❌ Quit", "q", AppAction::Quit),
         ];
-        let n = actions.len() as u16;
-        let cells = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Percentage(100 / n); n as usize])
-            .split(area);
 
-        for (cell, (label, action)) in cells.iter().zip(actions.iter()) {
-            app.action_rects.push((*cell, *action));
-            let text = format!("{} {}", label, action_key(*action));
-            let fg_color = if *action == AppAction::Quit {
+        let mut spans = Vec::new();
+        let mut current_x = area.x;
+
+        for (label, key, action) in actions {
+            let btn_text = format!(" {} [{}] ", label, key);
+            let btn_len = btn_text.chars().count() as u16;
+
+            let rect = Rect {
+                x: current_x,
+                y: area.y,
+                width: btn_len,
+                height: 1,
+            };
+            app.action_rects.push((rect, action));
+            current_x += btn_len;
+
+            let fg = if action == AppAction::Quit {
                 theme.error
             } else {
                 theme.accent
             };
-            let span = Span::styled(text, Style::default().fg(fg_color));
-            let p = Paragraph::new(Line::from(vec![span]))
-                .alignment(Alignment::Center)
-                .style(Style::default().bg(theme.bg));
-            f.render_widget(p, *cell);
+            spans.push(Span::styled(
+                format!(" {} ", label),
+                Style::default().fg(fg),
+            ));
+            spans.push(Span::styled(
+                format!("[{}] ", key),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            ));
         }
+
+        if let Some((msg, is_error, _)) = &app.toast {
+            spans.push(Span::raw(" | "));
+            let toast_style = if *is_error {
+                theme.error_badge().add_modifier(Modifier::BOLD)
+            } else {
+                theme.success_badge().add_modifier(Modifier::BOLD)
+            };
+            spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
+        }
+
+        let p = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(theme.bg));
+        f.render_widget(p, area);
     }
 }
 
 /// The keyboard shortcut behind each action.
+#[allow(dead_code)]
 fn action_key(action: AppAction) -> &'static str {
     match action {
         AppAction::Open => "↵",
