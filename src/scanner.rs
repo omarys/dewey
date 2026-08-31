@@ -214,8 +214,7 @@ impl LibraryScanner {
             if let Ok(entries) = fs::read_dir(&current_dir) {
                 let mut subdirs = Vec::new();
                 let mut has_direct_archives = false;
-                let mut has_direct_meta = false;
-                let mut has_direct_images = false;
+                let mut has_direct_series_json = false;
 
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -225,38 +224,30 @@ impl LibraryScanner {
                         }
                     } else if Self::is_chapter_file(&p) {
                         has_direct_archives = true;
-                    } else if Self::is_series_meta_file(&p) {
-                        has_direct_meta = true;
-                    } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                        let l = ext.to_lowercase();
-                        if matches!(l.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") {
-                            has_direct_images = true;
+                    } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        if name.eq_ignore_ascii_case("series.json") {
+                            has_direct_series_json = true;
                         }
                     }
                 }
 
-                // If this directory has subdirectories that are NOT leaf image chapters (e.g. child series folders or sub-categories),
-                // then this directory is strictly an organizational/category directory, NOT a series!
-                let has_sub_series_or_categories = !subdirs.is_empty()
-                    && subdirs.iter().any(|d| !Self::is_leaf_image_chapter(d));
-
-                let has_chapter_subdirs = !subdirs.is_empty()
+                // Check if all subdirectories are actual unpacked image chapter folders
+                let all_subdirs_are_image_chapters = !subdirs.is_empty()
                     && subdirs.iter().all(|d| Self::is_leaf_image_chapter(d));
 
-                if current_dir != library_dir && !has_sub_series_or_categories {
-                    if has_direct_archives
-                        || has_chapter_subdirs
-                        || (subdirs.is_empty() && (has_direct_meta || has_direct_images))
-                    {
-                        // This directory is a Series container! Do not recurse into its chapter contents.
-                        result.push(current_dir);
-                        continue;
+                // A directory is a Series container if:
+                // 1. It directly contains chapter archives (.cbz, .zip, .pdf, .cbr, .epub)
+                // 2. OR it directly contains series.json
+                // 3. OR all of its subdirectories are unpacked image chapters (e.g. "Chapter 1", "Chapter 2")
+                if current_dir != library_dir
+                    && (has_direct_archives || has_direct_series_json || all_subdirs_are_image_chapters)
+                {
+                    result.push(current_dir);
+                } else {
+                    // Category / organization folder (or library root): recurse into subdirectories
+                    for subdir in subdirs {
+                        stack.push(subdir);
                     }
-                }
-
-                // Category / organization folder (or root): recurse into subdirectories
-                for subdir in subdirs {
-                    stack.push(subdir);
                 }
             }
         }
@@ -265,14 +256,18 @@ impl LibraryScanner {
         result
     }
 
-    /// Returns true if a directory contains image files directly and has NO subdirectories of its own.
+    /// Returns true if a directory contains unpacked manga page images directly and has NO subdirectories,
+    /// NO .cbz/.zip archives, and NO series.json.
     pub fn is_leaf_image_chapter(path: &Path) -> bool {
         if !path.is_dir() || Self::is_special_dir(path) {
             return false;
         }
         if let Ok(entries) = fs::read_dir(path) {
             let mut has_subdirs = false;
-            let mut has_images = false;
+            let mut has_archives = false;
+            let mut has_series_json = false;
+            let mut image_count = 0;
+
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir() {
@@ -280,14 +275,35 @@ impl LibraryScanner {
                         has_subdirs = true;
                         break;
                     }
-                } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    let l = ext.to_lowercase();
-                    if matches!(l.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") {
-                        has_images = true;
+                } else if Self::is_chapter_file(&p) {
+                    has_archives = true;
+                    break;
+                } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if name.eq_ignore_ascii_case("series.json") {
+                        has_series_json = true;
+                        break;
+                    }
+                    let l = name.to_lowercase();
+                    if l.ends_with(".jpg")
+                        || l.ends_with(".jpeg")
+                        || l.ends_with(".png")
+                        || l.ends_with(".webp")
+                        || l.ends_with(".avif")
+                    {
+                        // Ignore standard cover filenames when counting page images
+                        if l != "cover.jpg"
+                            && l != "cover.png"
+                            && l != "cover.webp"
+                            && l != "folder.jpg"
+                            && l != "folder.png"
+                            && l != "poster.jpg"
+                        {
+                            image_count += 1;
+                        }
                     }
                 }
             }
-            !has_subdirs && has_images
+            !has_subdirs && !has_archives && !has_series_json && image_count >= 1
         } else {
             false
         }
@@ -1004,8 +1020,11 @@ mod tests {
         std::fs::create_dir_all(&manhwa_action).unwrap();
 
         std::fs::write(manga_action.join("c001.cbz"), b"fake_cbz").unwrap();
+        std::fs::write(manga_action.join("cover.jpg"), b"fake_jpg").unwrap();
         std::fs::write(manga_comedy.join("c001.cbz"), b"fake_cbz").unwrap();
+        std::fs::write(manga_comedy.join("cover.jpg"), b"fake_jpg").unwrap();
         std::fs::write(manhwa_action.join("c001.cbz"), b"fake_cbz").unwrap();
+        std::fs::write(manhwa_action.join("cover.jpg"), b"fake_jpg").unwrap();
 
         let db = Database::in_memory().unwrap();
         let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
