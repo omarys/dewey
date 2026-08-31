@@ -617,6 +617,21 @@ pub fn render_action_bar(
 ) {
     app.action_rects.clear();
 
+    if let Some((msg, is_error, _)) = &app.toast {
+        let toast_style = if *is_error {
+            theme.error_badge().add_modifier(Modifier::BOLD)
+        } else {
+            theme.success_badge().add_modifier(Modifier::BOLD)
+        };
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled(format!(" 🔔 {} ", msg), toast_style),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(theme.bg));
+        f.render_widget(p, area);
+        return;
+    }
+
     if is_portrait && area.height >= 2 {
         let row_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -625,19 +640,19 @@ pub fn render_action_bar(
 
         let row1_actions = [
             ("📖 Read", AppAction::Open),
-            ("⬇ Fetch", AppAction::Fetch),
-            ("⏭ Next", AppAction::FetchNext),
             ("🔍 Find", AppAction::Search),
             ("⚡ Filter", AppAction::Filter),
+            ("👁 Hidden", AppAction::CycleHidden),
             ("🏷 Move", AppAction::TagCategory),
+            ("🔒 Hide", AppAction::ToggleHidden),
         ];
 
         let row2_actions = [
-            ("👁 Hide", AppAction::ToggleHidden),
-            ("🔄 Mode", AppAction::Mode),
-            ("✓ Mark", AppAction::MarkRead),
+            ("⬇ Fetch", AppAction::Fetch),
             ("📁 Scan", AppAction::Scan),
-            ("🗑 Del", AppAction::Delete),
+            ("✓ Mark", AppAction::MarkRead),
+            ("🔄 Mode", AppAction::Mode),
+            ("❓ Help", AppAction::Help),
             ("❌ Quit", AppAction::Quit),
         ];
 
@@ -672,16 +687,16 @@ pub fn render_action_bar(
     } else {
         let actions = [
             ("📖 Read", AppAction::Open),
-            ("⬇ Fetch", AppAction::Fetch),
-            ("⏭ Next", AppAction::FetchNext),
             ("🔍 Find", AppAction::Search),
             ("⚡ Filter", AppAction::Filter),
+            ("👁 Hidden", AppAction::CycleHidden),
             ("🏷 Move", AppAction::TagCategory),
-            ("👁 Hide", AppAction::ToggleHidden),
-            ("🔄 Mode", AppAction::Mode),
-            ("✓ Mark", AppAction::MarkRead),
+            ("🔒 Hide", AppAction::ToggleHidden),
+            ("⬇ Fetch", AppAction::Fetch),
             ("📁 Scan", AppAction::Scan),
-            ("🗑 Del", AppAction::Delete),
+            ("✓ Mark", AppAction::MarkRead),
+            ("🔄 Mode", AppAction::Mode),
+            ("❓ Help", AppAction::Help),
             ("❌ Quit", AppAction::Quit),
         ];
         let n = actions.len() as u16;
@@ -721,127 +736,12 @@ fn action_key(action: AppAction) -> &'static str {
         AppAction::SwitchPane => "Tab",
         AppAction::Search => "/",
         AppAction::Filter => "f",
+        AppAction::CycleHidden => ".",
         AppAction::TagCategory => "t",
         AppAction::ToggleHidden => "H",
+        AppAction::Help => "?",
         AppAction::Quit => "q",
     }
-}
-
-pub fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let mut spans = vec![
-        Span::styled(
-            " [/] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Search  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [f] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("Filter: {}  ", app.filter_mode.label()),
-            Style::default().fg(theme.fg),
-        ),
-        Span::styled(
-            " [.] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("Hidden: {}  ", app.hidden_filter.label()),
-            Style::default().fg(theme.fg),
-        ),
-        Span::styled(
-            " [H] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Hide  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [t] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Move/Tag  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [Enter] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Read  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [d] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Fetch  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [s] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Scan  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [m] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Mark Read  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [M] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Mode  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [Tab] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Pane  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [?] ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Help  ", Style::default().fg(theme.fg)),
-        Span::styled(
-            " [q] ",
-            Style::default()
-                .fg(theme.error)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Quit", Style::default().fg(theme.fg)),
-    ];
-
-    if let Some((msg, is_error, _)) = &app.toast {
-        spans.push(Span::raw("   |   "));
-        let toast_style = if *is_error {
-            theme.error_badge().add_modifier(Modifier::BOLD)
-        } else {
-            theme.success_badge().add_modifier(Modifier::BOLD)
-        };
-        spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
-    }
-
-    let p = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Left)
-        .style(Style::default().bg(theme.bg));
-    f.render_widget(p, area);
 }
 
 pub fn render_help_modal(f: &mut Frame, theme: &Theme) {

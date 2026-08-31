@@ -46,6 +46,7 @@ impl HiddenFilter {
         }
     }
 
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             HiddenFilter::Hide => "Hide",
@@ -100,8 +101,10 @@ pub enum AppAction {
     SwitchPane,
     Search,
     Filter,
+    CycleHidden,
     ToggleHidden,
     TagCategory,
+    Help,
     Quit,
 }
 

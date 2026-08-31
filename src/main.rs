@@ -502,6 +502,9 @@ async fn main() -> Result<()> {
                                     AppAction::Filter => {
                                         app.toggle_filter_mode();
                                     }
+                                    AppAction::CycleHidden => {
+                                        app.cycle_hidden_filter();
+                                    }
                                     AppAction::TagCategory => {
                                         app.open_category_modal();
                                     }
@@ -541,6 +544,9 @@ async fn main() -> Result<()> {
                                     }
                                     AppAction::SwitchPane => {
                                         app.switch_pane_forward();
+                                    }
+                                    AppAction::Help => {
+                                        app.show_help_modal = true;
                                     }
                                     AppAction::Quit => {
                                         app.should_quit = true;
