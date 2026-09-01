@@ -100,7 +100,8 @@ impl TypeFilter {
                     let l = cat.to_lowercase();
                     l.starts_with("manhwa")
                         || l.starts_with("webtoon")
-                        || l.split('/').any(|p| p.trim() == "manhwa" || p.trim() == "webtoon")
+                        || l.split('/')
+                            .any(|p| p.trim() == "manhwa" || p.trim() == "webtoon")
                 } else {
                     reading_mode == Some("webtoon")
                 }
@@ -110,7 +111,8 @@ impl TypeFilter {
                     let l = cat.to_lowercase();
                     l.starts_with("comic")
                         || l.starts_with("comicbook")
-                        || l.split('/').any(|p| p.trim() == "comic" || p.trim() == "comicbook")
+                        || l.split('/')
+                            .any(|p| p.trim() == "comic" || p.trim() == "comicbook")
                 } else {
                     false
                 }
@@ -205,6 +207,7 @@ pub struct App {
     pub available_categories: Vec<String>,
     pub category_input: String,
     pub category_selected_idx: usize,
+    pub category_state: ListState,
 
     pub active_pane: ActivePane,
     pub download_jobs: Vec<DownloadJob>,
@@ -217,6 +220,14 @@ pub struct App {
     /// Last-frame render areas, used to hit-test taps.
     pub series_rect: Option<Rect>,
     pub chapters_rect: Option<Rect>,
+    /// Modal render areas for Category/Tag popup.
+    pub category_modal_rect: Option<Rect>,
+    pub category_list_rect: Option<Rect>,
+    pub category_confirm_rect: Option<Rect>,
+    pub category_cancel_rect: Option<Rect>,
+    pub category_clear_rect: Option<Rect>,
+    /// (time, index) of the previous left-click in category modal, for double-tap confirm.
+    pub last_category_tap: Option<(Instant, usize)>,
     /// Tappable tab navigation buttons in portrait mode.
     pub tab_rects: Vec<(Rect, ActivePane)>,
     /// Tappable action-bar buttons rendered by the footer / touch bar.
@@ -237,6 +248,8 @@ impl App {
         series_state.select(Some(0));
         let mut chapters_state = TableState::default();
         chapters_state.select(Some(0));
+        let mut category_state = ListState::default();
+        category_state.select(Some(0));
 
         let mut app = Self {
             config,
@@ -258,6 +271,7 @@ impl App {
             available_categories: Vec::new(),
             category_input: String::new(),
             category_selected_idx: 0,
+            category_state,
             active_pane: ActivePane::SeriesList,
             download_jobs: Vec::new(),
             tick_count: 0,
@@ -267,6 +281,12 @@ impl App {
             pending_delete_id: None,
             series_rect: None,
             chapters_rect: None,
+            category_modal_rect: None,
+            category_list_rect: None,
+            category_confirm_rect: None,
+            category_cancel_rect: None,
+            category_clear_rect: None,
+            last_category_tap: None,
             tab_rects: Vec::new(),
             action_rects: Vec::new(),
             last_tap: None,
@@ -369,10 +389,10 @@ impl App {
                 }
 
                 // 2. Type / Medium Filter (All / Manhwa / Manga / Comicbook)
-                if !self.type_filter.matches(
-                    s.series.category.as_deref(),
-                    Some(s.series.reading_mode()),
-                ) {
+                if !self
+                    .type_filter
+                    .matches(s.series.category.as_deref(), Some(s.series.reading_mode()))
+                {
                     return false;
                 }
 
@@ -449,9 +469,6 @@ impl App {
         }
 
         let mut cats = vec![
-            "Action".to_string(),
-            "Comedy".to_string(),
-            "Romance".to_string(),
             "Manga".to_string(),
             "Manga/Action".to_string(),
             "Manga/Comedy".to_string(),
@@ -460,6 +477,13 @@ impl App {
             "Manhwa/Action".to_string(),
             "Manhwa/Comedy".to_string(),
             "Manhwa/Romance".to_string(),
+            "Comic".to_string(),
+            "Comic/Action".to_string(),
+            "Comic/Comedy".to_string(),
+            "Comic/Romance".to_string(),
+            "Action".to_string(),
+            "Comedy".to_string(),
+            "Romance".to_string(),
             "Uncategorized".to_string(),
         ];
 
@@ -476,12 +500,49 @@ impl App {
             .current_series()
             .and_then(|s| s.series.category.clone())
             .unwrap_or_default();
-        self.category_selected_idx = 0;
+
+        let initial_idx = if !self.category_input.is_empty() {
+            self.available_categories
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(&self.category_input))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        self.category_selected_idx = initial_idx;
+        let mut category_state = ListState::default();
+        category_state.select(Some(initial_idx));
+        self.category_state = category_state;
+        self.last_category_tap = None;
         self.input_mode = InputMode::CategoryPicker;
     }
 
     pub fn close_category_modal(&mut self) {
         self.input_mode = InputMode::Normal;
+        self.category_modal_rect = None;
+        self.category_list_rect = None;
+        self.category_confirm_rect = None;
+        self.category_cancel_rect = None;
+        self.category_clear_rect = None;
+        self.last_category_tap = None;
+    }
+
+    pub fn select_category_index(&mut self, idx: usize) {
+        if idx < self.available_categories.len() {
+            self.category_selected_idx = idx;
+            self.category_input = self.available_categories[idx].clone();
+            self.category_state.select(Some(idx));
+        }
+    }
+
+    pub fn handle_category_tap(&mut self, idx: usize) -> bool {
+        let now = Instant::now();
+        let is_double = self
+            .last_category_tap
+            .is_some_and(|(t, i)| i == idx && now.duration_since(t) < Duration::from_millis(400));
+        self.last_category_tap = Some((now, idx));
+        is_double
     }
 
     pub fn category_modal_select_next(&mut self) {
@@ -489,6 +550,7 @@ impl App {
             self.category_selected_idx =
                 (self.category_selected_idx + 1) % self.available_categories.len();
             self.category_input = self.available_categories[self.category_selected_idx].clone();
+            self.category_state.select(Some(self.category_selected_idx));
         }
     }
 
@@ -500,6 +562,7 @@ impl App {
                 self.category_selected_idx -= 1;
             }
             self.category_input = self.available_categories[self.category_selected_idx].clone();
+            self.category_state.select(Some(self.category_selected_idx));
         }
     }
 
@@ -591,9 +654,8 @@ impl App {
                     );
                     return Ok(());
                 }
-                std::fs::create_dir_all(&target_parent).with_context(|| {
-                    format!("Failed to create directory {:?}", target_parent)
-                })?;
+                std::fs::create_dir_all(&target_parent)
+                    .with_context(|| format!("Failed to create directory {:?}", target_parent))?;
                 std::fs::rename(src_dir, &target_dir)
                     .with_context(|| format!("Failed to move {:?} to {:?}", src_dir, target_dir))?;
 
@@ -726,9 +788,8 @@ impl App {
                 return Ok(());
             }
             if let Some(target_parent) = new_dir.parent() {
-                std::fs::create_dir_all(target_parent).with_context(|| {
-                    format!("Failed to create directory {:?}", target_parent)
-                })?;
+                std::fs::create_dir_all(target_parent)
+                    .with_context(|| format!("Failed to create directory {:?}", target_parent))?;
             }
             std::fs::rename(&series_dir, &new_dir)
                 .with_context(|| format!("Failed to rename {:?} to {:?}", series_dir, new_dir))?;
@@ -1572,8 +1633,12 @@ mod tests {
         // Tag first series as "Manhwa/Action", second as "Manga/Comedy"
         let id1 = app.series_list[0].series.id;
         let id2 = app.series_list[1].series.id;
-        app.db.update_series_category(id1, Some("Manhwa/Action")).unwrap();
-        app.db.update_series_category(id2, Some("Manga/Comedy")).unwrap();
+        app.db
+            .update_series_category(id1, Some("Manhwa/Action"))
+            .unwrap();
+        app.db
+            .update_series_category(id2, Some("Manga/Comedy"))
+            .unwrap();
         app.reload_series().unwrap();
 
         // 1. Default: TypeFilter::All
@@ -1635,7 +1700,8 @@ mod tests {
 
     #[test]
     fn test_toggle_selected_series_hidden_directory_rename() {
-        let temp_lib = std::env::temp_dir().join(format!("dewey_app_rename_test_{}", std::process::id()));
+        let temp_lib =
+            std::env::temp_dir().join(format!("dewey_app_rename_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_lib);
         std::fs::create_dir_all(&temp_lib).unwrap();
 
@@ -1645,8 +1711,11 @@ mod tests {
         std::fs::write(&ch_path, b"dummy").unwrap();
 
         let db = Database::in_memory().unwrap();
-        let series_id = db.insert_or_get_series_with_cover_and_hidden("My Manga", None, false).unwrap();
-        db.record_chapter_download(series_id, 1.0, ch_path.to_str().unwrap(), Some(10), None).unwrap();
+        let series_id = db
+            .insert_or_get_series_with_cover_and_hidden("My Manga", None, false)
+            .unwrap();
+        db.record_chapter_download(series_id, 1.0, ch_path.to_str().unwrap(), Some(10), None)
+            .unwrap();
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut cfg = Config::default();
@@ -1685,7 +1754,8 @@ mod tests {
 
     #[test]
     fn test_apply_category_moves_directory_and_updates_db() {
-        let temp_lib = std::env::temp_dir().join(format!("dewey_app_cat_test_{}", std::process::id()));
+        let temp_lib =
+            std::env::temp_dir().join(format!("dewey_app_cat_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_lib);
         std::fs::create_dir_all(&temp_lib).unwrap();
 
@@ -1737,5 +1807,41 @@ mod tests {
         assert_eq!(app.filtered_indices.len(), 0);
 
         let _ = std::fs::remove_dir_all(&temp_lib);
+    }
+
+    #[test]
+    fn test_category_modal_touch_and_selection() {
+        let mut app = test_app();
+        assert!(app.series_list.len() >= 2);
+
+        // Open modal
+        app.open_category_modal();
+        assert_eq!(app.input_mode, InputMode::CategoryPicker);
+        assert_eq!(app.category_input, "Manga/Action");
+        assert_eq!(app.category_selected_idx, 1);
+
+        // Select next category
+        app.category_modal_select_next();
+        assert_eq!(app.category_selected_idx, 2);
+        assert_eq!(app.category_input, "Manga/Comedy");
+
+        // Touch selection via select_category_index
+        let manhwa_idx = app
+            .available_categories
+            .iter()
+            .position(|c| c == "Manhwa")
+            .unwrap();
+        app.select_category_index(manhwa_idx);
+        assert_eq!(app.category_selected_idx, manhwa_idx);
+        assert_eq!(app.category_input, "Manhwa");
+
+        // Tap handling & double-tap
+        assert!(!app.handle_category_tap(manhwa_idx));
+        assert!(app.handle_category_tap(manhwa_idx));
+
+        // Close modal
+        app.close_category_modal();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.category_modal_rect.is_none());
     }
 }

@@ -475,7 +475,91 @@ async fn main() -> Result<()> {
 
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            // 1. Check navigation tabs (in portrait mode)
+                            // 0. If Help Modal is open, tap dismisses modal and prevents click-through
+                            if app.show_help_modal {
+                                app.show_help_modal = false;
+                                continue;
+                            }
+
+                            // 1. If Category/Tag Picker Modal is open, handle modal touch targets
+                            if app.input_mode == app::InputMode::CategoryPicker {
+                                // 1a. Check Confirm button
+                                if let Some(r) = app.category_confirm_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        if let Err(err) = app.confirm_category_selection() {
+                                            app.set_toast(
+                                                format!("Failed to move series: {}", err),
+                                                true,
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                }
+                                // 1b. Check Cancel button
+                                if let Some(r) = app.category_cancel_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.close_category_modal();
+                                        continue;
+                                    }
+                                }
+                                // 1c. Check Clear button
+                                if let Some(r) = app.category_clear_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.category_input.clear();
+                                        continue;
+                                    }
+                                }
+                                // 1d. Check Category List items
+                                if let Some(rect) = app.category_list_rect {
+                                    if x >= rect.x
+                                        && x < rect.x + rect.width
+                                        && y > rect.y
+                                        && y < rect.y + rect.height.saturating_sub(1)
+                                    {
+                                        let visible_row = (y - (rect.y + 1)) as usize;
+                                        let target_idx = app.category_state.offset() + visible_row;
+                                        if target_idx < app.available_categories.len() {
+                                            app.select_category_index(target_idx);
+                                            if app.handle_category_tap(target_idx) {
+                                                if let Err(err) = app.confirm_category_selection() {
+                                                    app.set_toast(
+                                                        format!("Failed to move series: {}", err),
+                                                        true,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                }
+                                // 1e. If tapped outside modal bounding box, dismiss modal
+                                if let Some(modal_rect) = app.category_modal_rect {
+                                    if x < modal_rect.x
+                                        || x >= modal_rect.x + modal_rect.width
+                                        || y < modal_rect.y
+                                        || y >= modal_rect.y + modal_rect.height
+                                    {
+                                        app.close_category_modal();
+                                        continue;
+                                    }
+                                }
+                                // 1f. Tapped somewhere inside modal: consume event (prevent click-through)
+                                continue;
+                            }
+
+                            // 2. Check navigation tabs (in portrait mode)
                             if let Some((_, pane)) = app.tab_rects.iter().find(|(r, _)| {
                                 x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
                             }) {
@@ -614,6 +698,10 @@ async fn main() -> Result<()> {
                             }
                         }
                         MouseEventKind::ScrollDown => {
+                            if app.input_mode == app::InputMode::CategoryPicker {
+                                app.category_modal_select_next();
+                                continue;
+                            }
                             if let Some(rect) = app.series_rect {
                                 if x >= rect.x
                                     && x < rect.x + rect.width
@@ -642,6 +730,10 @@ async fn main() -> Result<()> {
                             }
                         }
                         MouseEventKind::ScrollUp => {
+                            if app.input_mode == app::InputMode::CategoryPicker {
+                                app.category_modal_select_prev();
+                                continue;
+                            }
                             if let Some(rect) = app.series_rect {
                                 if x >= rect.x
                                     && x < rect.x + rect.width

@@ -28,7 +28,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 Constraint::Length(3),                                 // Portrait Tab Switcher
                 Constraint::Min(8),                                    // Active List + Details
                 Constraint::Length(if has_downloads { 3 } else { 0 }), // Downloads
-                Constraint::Length(2),                                 // Unified 2-row Touch Action Pad
+                Constraint::Length(2), // Unified 2-row Touch Action Pad
             ])
             .split(area);
 

@@ -662,8 +662,13 @@ impl Database {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?;
 
         if count == 0 {
-            let series_id =
-                self.insert_or_get_series_inner(&conn, "Solo Leveling", None, false, Some("Manhwa/Action"))?;
+            let series_id = self.insert_or_get_series_inner(
+                &conn,
+                "Solo Leveling",
+                None,
+                false,
+                Some("Manhwa/Action"),
+            )?;
             conn.execute(
                 "UPDATE series SET
                     sort_title = 'Solo Leveling',
@@ -698,8 +703,13 @@ impl Database {
                 )?;
             }
 
-            let s2_id =
-                self.insert_or_get_series_inner(&conn, "Chainsaw Man", None, false, Some("Manga/Action"))?;
+            let s2_id = self.insert_or_get_series_inner(
+                &conn,
+                "Chainsaw Man",
+                None,
+                false,
+                Some("Manga/Action"),
+            )?;
             conn.execute(
                 "UPDATE series SET
                     sort_title = 'Chainsaw Man',
@@ -1138,7 +1148,11 @@ mod tests {
     fn test_update_series_hidden_and_rename_directory() {
         let db = Database::in_memory().unwrap();
         let series_id = db
-            .insert_or_get_series_with_cover_and_hidden("Solo Leveling", Some("/manga/Solo/cover.jpg"), false)
+            .insert_or_get_series_with_cover_and_hidden(
+                "Solo Leveling",
+                Some("/manga/Solo/cover.jpg"),
+                false,
+            )
             .unwrap();
 
         db.record_chapter_download(series_id, 1.0, "/manga/Solo/c001.cbz", Some(20), None)

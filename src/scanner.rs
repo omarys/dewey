@@ -232,15 +232,17 @@ impl LibraryScanner {
                 }
 
                 // Check if all subdirectories are actual unpacked image chapter folders
-                let all_subdirs_are_image_chapters = !subdirs.is_empty()
-                    && subdirs.iter().all(|d| Self::is_leaf_image_chapter(d));
+                let all_subdirs_are_image_chapters =
+                    !subdirs.is_empty() && subdirs.iter().all(|d| Self::is_leaf_image_chapter(d));
 
                 // A directory is a Series container if:
                 // 1. It directly contains chapter archives (.cbz, .zip, .pdf, .cbr, .epub)
                 // 2. OR it directly contains series.json
                 // 3. OR all of its subdirectories are unpacked image chapters (e.g. "Chapter 1", "Chapter 2")
                 if current_dir != library_dir
-                    && (has_direct_archives || has_direct_series_json || all_subdirs_are_image_chapters)
+                    && (has_direct_archives
+                        || has_direct_series_json
+                        || all_subdirs_are_image_chapters)
                 {
                     result.push(current_dir);
                 } else {
@@ -334,9 +336,7 @@ impl LibraryScanner {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown_Series".to_string());
 
-        let folder_name = raw_name
-            .trim_start_matches('.')
-            .replace('_', " ");
+        let folder_name = raw_name.trim_start_matches('.').replace('_', " ");
 
         let series_title = series_meta
             .as_ref()
@@ -928,10 +928,16 @@ mod tests {
         let series = db.get_all_series().unwrap();
         assert_eq!(series.len(), 2);
 
-        let secret = series.iter().find(|s| s.series.title == "Secret Series").unwrap();
+        let secret = series
+            .iter()
+            .find(|s| s.series.title == "Secret Series")
+            .unwrap();
         assert!(secret.series.is_hidden);
 
-        let normal = series.iter().find(|s| s.series.title == "Normal Series").unwrap();
+        let normal = series
+            .iter()
+            .find(|s| s.series.title == "Normal Series")
+            .unwrap();
         assert!(!normal.series.is_hidden);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -953,7 +959,11 @@ mod tests {
         std::fs::write(s2.join("c001.cbz"), b"fake_cbz").unwrap();
 
         // 3. .Other/Manga/Action/Secret_Manga (Nested hidden)
-        let s3 = root.join(".Other").join("Manga").join("Action").join("Secret_Manga");
+        let s3 = root
+            .join(".Other")
+            .join("Manga")
+            .join("Action")
+            .join("Secret_Manga");
         std::fs::create_dir_all(&s3).unwrap();
         std::fs::write(s3.join("c001.cbz"), b"fake_cbz").unwrap();
 
@@ -969,19 +979,31 @@ mod tests {
         let series = db.get_all_series().unwrap();
         assert_eq!(series.len(), 4);
 
-        let solo = series.iter().find(|s| s.series.title == "Solo Leveling").unwrap();
+        let solo = series
+            .iter()
+            .find(|s| s.series.title == "Solo Leveling")
+            .unwrap();
         assert_eq!(solo.series.category.as_deref(), Some("Manga/Action"));
         assert!(!solo.series.is_hidden);
 
-        let hero = series.iter().find(|s| s.series.title == "Return Hero").unwrap();
+        let hero = series
+            .iter()
+            .find(|s| s.series.title == "Return Hero")
+            .unwrap();
         assert_eq!(hero.series.category.as_deref(), Some("Manhwa/Comedy"));
         assert!(!hero.series.is_hidden);
 
-        let secret = series.iter().find(|s| s.series.title == "Secret Manga").unwrap();
+        let secret = series
+            .iter()
+            .find(|s| s.series.title == "Secret Manga")
+            .unwrap();
         assert_eq!(secret.series.category.as_deref(), Some("Manga/Action"));
         assert!(secret.series.is_hidden);
 
-        let top = series.iter().find(|s| s.series.title == "Top Level Series").unwrap();
+        let top = series
+            .iter()
+            .find(|s| s.series.title == "Top Level Series")
+            .unwrap();
         assert_eq!(top.series.category.as_deref(), None);
         assert!(!top.series.is_hidden);
 

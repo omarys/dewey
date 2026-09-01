@@ -404,7 +404,9 @@ pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) 
                 Span::styled("Category:  ", Style::default().fg(theme.muted_fg)),
                 Span::styled(
                     s.series.category.as_deref().unwrap_or("Uncategorized"),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("   Author: ", Style::default().fg(theme.muted_fg)),
                 Span::styled(meta_author, Style::default().fg(theme.fg)),
@@ -696,8 +698,7 @@ pub fn render_action_bar(
                 }
             }
 
-            let p = Paragraph::new(Line::from(spans))
-                .style(Style::default().bg(theme.bg));
+            let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg));
             f.render_widget(p, *row_area);
         }
     } else {
@@ -758,8 +759,7 @@ pub fn render_action_bar(
             spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
         }
 
-        let p = Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(theme.bg));
+        let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg));
         f.render_widget(p, area);
     }
 }
@@ -951,16 +951,25 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
     f.render_widget(p, area);
 }
 
-pub fn render_category_modal(f: &mut Frame, app: &App, theme: &Theme) {
-    let area = centered_rect(65, 70, f.area());
+pub fn render_category_modal(f: &mut Frame, app: &mut App, theme: &Theme) {
+    let screen = f.area();
+    let is_portrait = screen.height > screen.width;
+
+    let area = if is_portrait {
+        centered_rect(92, 75, screen)
+    } else {
+        centered_rect(70, 75, screen)
+    };
+    app.category_modal_rect = Some(area);
     f.render_widget(Clear, area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Input box
-            Constraint::Min(5),    // Preset categories list
-            Constraint::Length(3), // Footer hints
+            Constraint::Min(6),    // Preset categories list
+            Constraint::Length(3), // Action touch buttons
+            Constraint::Length(1), // Footer hint text
         ])
         .split(area);
 
@@ -977,10 +986,17 @@ pub fn render_category_modal(f: &mut Frame, app: &App, theme: &Theme) {
         .title(format!(" 🏷 Move / Tag [{}] Category ", series_title));
 
     let input_p = Paragraph::new(Line::from(vec![
-        Span::styled(" Category: ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " Category: ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("{}_", app.category_input),
-            Style::default().fg(theme.highlight_fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.highlight_fg)
+                .add_modifier(Modifier::BOLD),
         ),
     ]))
     .block(input_block)
@@ -988,6 +1004,8 @@ pub fn render_category_modal(f: &mut Frame, app: &App, theme: &Theme) {
     f.render_widget(input_p, chunks[0]);
 
     // 2. Preset / Available category list
+    app.category_list_rect = Some(chunks[1]);
+
     let items: Vec<ListItem> = app
         .available_categories
         .iter()
@@ -1011,18 +1029,86 @@ pub fn render_category_modal(f: &mut Frame, app: &App, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.inactive_border())
-        .title(" Available / Suggested Categories (↑/↓ to choose, or type custom) ");
+        .title(" Available / Suggested Categories (tap or ↑/↓ to choose) ");
 
-    let list = List::new(items).block(list_block);
-    f.render_widget(list, chunks[1]);
+    let list = List::new(items).block(list_block).highlight_style(
+        Style::default()
+            .fg(theme.highlight_fg)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    );
 
-    // 3. Footer hints
+    f.render_stateful_widget(list, chunks[1], &mut app.category_state);
+
+    // 3. Touch button bar (Confirm, Clear, Cancel)
+    let button_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(40), // Confirm
+            Constraint::Percentage(25), // Clear
+            Constraint::Percentage(35), // Cancel
+        ])
+        .split(chunks[2]);
+
+    app.category_confirm_rect = Some(button_chunks[0]);
+    app.category_clear_rect = Some(button_chunks[1]);
+    app.category_cancel_rect = Some(button_chunks[2]);
+
+    let confirm_btn = Paragraph::new(Line::from(vec![Span::styled(
+        "✔ Confirm [↵]",
+        Style::default()
+            .fg(theme.highlight_fg)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(Alignment::Center)
+    .style(Style::default().bg(theme.accent))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.accent)),
+    );
+    f.render_widget(confirm_btn, button_chunks[0]);
+
+    let clear_btn = Paragraph::new(Line::from(vec![Span::styled(
+        "⌫ Clear",
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(Alignment::Center)
+    .style(Style::default().bg(theme.highlight_bg))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.muted_fg)),
+    );
+    f.render_widget(clear_btn, button_chunks[1]);
+
+    let cancel_btn = Paragraph::new(Line::from(vec![Span::styled(
+        "✖ Cancel [Esc]",
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(Alignment::Center)
+    .style(Style::default().bg(theme.highlight_bg))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.muted_fg)),
+    );
+    f.render_widget(cancel_btn, button_chunks[2]);
+
+    // 4. Footer hints
     let hints = Paragraph::new(
-        " [Enter: Confirm & Move Folder]   [Esc: Cancel]   [Supports nesting like 'Manga/Action'] ",
+        "Tap category / button, or type custom folder. Supports nesting like 'Manga/Action'",
     )
     .alignment(Alignment::Center)
     .style(Style::default().fg(theme.muted_fg));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(hints, chunks[3]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
