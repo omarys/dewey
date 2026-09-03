@@ -947,6 +947,13 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled(
+                "  Delete                ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Delete selected chapter (press twice to confirm)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "  r                     ",
                 Style::default().fg(theme.warning),
             ),

@@ -188,6 +188,7 @@ impl LabradorRunner {
         }
         if let Some(out) = output_dir {
             cmd.arg("--series-dir").arg(out);
+            cmd.arg("--output-dir").arg(out);
         }
 
         cmd.stdin(std::process::Stdio::inherit())
@@ -313,6 +314,7 @@ impl LabradorRunner {
 
         if let Some(dir) = series_dir {
             cmd.arg("--series-dir").arg(dir);
+            cmd.arg("--output-dir").arg(dir);
         }
 
         let output = match tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output()).await {

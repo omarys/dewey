@@ -81,6 +81,7 @@ Dewey acts as the central orchestration "brain" between your local library, read
 | <kbd>m</kbd> | **Toggle Read** | Toggle chapter completed / uncompleted status |
 | <kbd>u</kbd> | **Mark Unread** | Clear a chapter's progress (page 0, not completed) |
 | <kbd>x</kbd> | **Delete Series** | Remove selected series (press twice to confirm) |
+| <kbd>Delete</kbd> | **Delete Chapter** | Remove selected chapter (press twice to confirm) |
 | <kbd>r</kbd> | **Reload** | Reload library entries and database stats |
 | <kbd>?</kbd> | **Help** | Toggle the keyboard navigation help modal |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | **Quit** | Exit Dewey cleanly |

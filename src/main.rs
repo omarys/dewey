@@ -481,15 +481,17 @@ async fn main() -> Result<()> {
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
                             app.request_delete_selected();
                         }
+                        (KeyCode::Delete, _) => {
+                            app.request_delete_chapter();
+                        }
                         (KeyCode::Esc, _) => {
+                            app.clear_pending_deletes();
                             if !app.search_query.is_empty()
                                 || app.filter_mode != app::FilterMode::All
                             {
                                 app.clear_search_and_filters();
                             } else if app.active_pane == app::ActivePane::ChaptersList {
                                 app.active_pane = app::ActivePane::SeriesList;
-                            } else {
-                                app.pending_delete_id = None;
                             }
                         }
                         (KeyCode::Char('a'), KeyModifiers::NONE) => {
@@ -813,7 +815,14 @@ async fn main() -> Result<()> {
                                         app.clear_progress_selected();
                                     }
                                     AppAction::Delete => {
-                                        app.request_delete_selected();
+                                        match app.active_pane {
+                                            app::ActivePane::ChaptersList => {
+                                                app.request_delete_chapter();
+                                            }
+                                            _ => {
+                                                app.request_delete_selected();
+                                            }
+                                        }
                                     }
                                     AppAction::SwitchPane => {
                                         app.switch_pane_forward();

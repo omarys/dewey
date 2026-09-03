@@ -220,6 +220,7 @@ pub struct App {
     pub toast: Option<(String, bool, Instant)>,
     pub show_help_modal: bool,
     pub pending_delete_id: Option<i64>,
+    pub pending_delete_chapter_id: Option<i64>,
     /// Last-frame render areas, used to hit-test taps.
     pub series_rect: Option<Rect>,
     pub chapters_rect: Option<Rect>,
@@ -301,6 +302,7 @@ impl App {
             toast: None,
             show_help_modal: false,
             pending_delete_id: None,
+            pending_delete_chapter_id: None,
             series_rect: None,
             chapters_rect: None,
             category_modal_rect: None,
@@ -737,7 +739,7 @@ impl App {
                 if let Some(fp) = &c.chapter.file_path {
                     let p = PathBuf::from(fp);
                     if let Some(parent) = p.parent() {
-                        if parent.exists() {
+                        if parent.exists() && parent.starts_with(&self.config.library_dir) {
                             return Some(parent.to_path_buf());
                         }
                     }
@@ -749,7 +751,7 @@ impl App {
         if let Some(cp) = &s.series.cover_path {
             let p = PathBuf::from(cp);
             if let Some(parent) = p.parent() {
-                if parent.exists() {
+                if parent.exists() && parent.starts_with(&self.config.library_dir) {
                     return Some(parent.to_path_buf());
                 }
             }
@@ -1331,6 +1333,11 @@ impl App {
         self.chapters_list.get(self.selected_chapter_idx)
     }
 
+    pub fn clear_pending_deletes(&mut self) {
+        self.pending_delete_id = None;
+        self.pending_delete_chapter_id = None;
+    }
+
     /// Selects the series at `idx` in filtered view (tap). Focuses the series pane,
     /// reloads the chapter list for it, and cancels any pending delete confirmation.
     pub fn select_series_index(&mut self, idx: usize) {
@@ -1342,7 +1349,7 @@ impl App {
         self.series_state.select(Some(idx));
         self.selected_chapter_idx = 0;
         let _ = self.reload_chapters();
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
     }
 
     /// Selects the chapter at `idx` (tap).
@@ -1353,7 +1360,7 @@ impl App {
         self.active_pane = ActivePane::ChaptersList;
         self.selected_chapter_idx = idx;
         self.chapters_state.select(Some(idx));
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
     }
 
     /// Registers a tap on (pane, idx); returns true when it is a double-tap on
@@ -1384,7 +1391,7 @@ impl App {
     }
 
     pub fn next_item(&mut self) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.filtered_indices.is_empty() {
@@ -1408,7 +1415,7 @@ impl App {
 
     /// `g`: jump to the top (first item) of the active list.
     pub fn jump_list_top(&mut self) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         match self.active_pane {
             ActivePane::SeriesList => self.select_series_index(0),
             ActivePane::ChaptersList => self.select_chapter_index(0),
@@ -1418,7 +1425,7 @@ impl App {
 
     /// `G`: jump to the bottom (last item) of the active list.
     pub fn jump_list_bottom(&mut self) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.filtered_indices.is_empty() {
@@ -1436,7 +1443,7 @@ impl App {
 
     /// `ctrl+d` / `ctrl+f`: scroll down by a fixed amount of items.
     pub fn page_down(&mut self, amount: usize) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.filtered_indices.is_empty() {
@@ -1458,7 +1465,7 @@ impl App {
 
     /// `ctrl+u` / `ctrl+b`: scroll up by a fixed amount of items.
     pub fn page_up(&mut self, amount: usize) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.filtered_indices.is_empty() {
@@ -1477,7 +1484,7 @@ impl App {
     }
 
     pub fn prev_item(&mut self) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.filtered_indices.is_empty() {
@@ -1506,7 +1513,7 @@ impl App {
     }
 
     pub fn switch_pane_forward(&mut self) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         self.active_pane = match self.active_pane {
             ActivePane::SeriesList => ActivePane::ChaptersList,
             ActivePane::ChaptersList => {
@@ -1521,7 +1528,7 @@ impl App {
     }
 
     pub fn switch_pane_backward(&mut self) {
-        self.pending_delete_id = None;
+        self.clear_pending_deletes();
         self.active_pane = match self.active_pane {
             ActivePane::SeriesList => {
                 if !self.download_jobs.is_empty() {
@@ -1977,6 +1984,7 @@ impl App {
                 self.config.library_dir.join(folder_name)
             }
         });
+        let _ = std::fs::create_dir_all(&series_dir);
 
         // If the series has no URL, open Labrador TUI immediately to resolve it,
         // regardless of missing chapters.
@@ -2137,7 +2145,7 @@ impl App {
 
         // Second press on the same series -> confirm and delete.
         if self.pending_delete_id.is_some() && self.pending_delete_id == current_id {
-            self.pending_delete_id = None;
+            self.clear_pending_deletes();
             match self.db.delete_series(current_id.unwrap()) {
                 Ok(()) => {
                     let _ = self.reload_series();
@@ -2147,10 +2155,91 @@ impl App {
                 Err(err) => self.set_toast(format!("Failed to delete series: {}", err), true),
             }
         } else {
+            self.clear_pending_deletes();
             self.pending_delete_id = current_id;
             if current_id.is_some() {
                 self.set_toast("Press x again to delete this series", false);
             }
+        }
+    }
+
+    /// Deletes the selected chapter. Requires a second `Delete` press on the same
+    /// chapter to confirm; any navigation clears the pending confirmation.
+    pub fn request_delete_chapter(&mut self) {
+        if self.active_pane != ActivePane::ChaptersList {
+            self.set_toast("Switch to Chapters list (Tab or l) to delete chapters", false);
+            return;
+        }
+
+        let chap = match self.current_chapter() {
+            Some(c) => c.clone(),
+            None => {
+                self.set_toast("No chapter selected", false);
+                return;
+            }
+        };
+
+        let chapter_id = chap.chapter.id;
+        let chapter_number = chap.chapter.chapter_number;
+        let file_path_opt = chap.chapter.file_path.clone();
+
+        if self.pending_delete_chapter_id.is_some()
+            && self.pending_delete_chapter_id == Some(chapter_id)
+        {
+            self.clear_pending_deletes();
+
+            // 1. Remove physical file/directory if it exists on disk
+            if let Some(ref fp) = file_path_opt {
+                let p = Path::new(fp);
+                if p.exists() {
+                    // Safety check: ensure we do not delete the series directory itself
+                    if let Some(curr_s) = self.current_series() {
+                        if let Some(s_dir) = self.find_series_directory(curr_s) {
+                            if p == s_dir {
+                                self.set_toast("Cannot delete series directory as chapter", true);
+                                return;
+                            }
+                        }
+                    }
+
+                    let rm_res = if p.is_dir() {
+                        std::fs::remove_dir_all(p)
+                    } else {
+                        std::fs::remove_file(p)
+                    };
+
+                    if let Err(err) = rm_res {
+                        self.set_toast(format!("Failed to delete chapter file: {}", err), true);
+                        return;
+                    }
+                }
+            }
+
+            // 2. Remove record from database (cascades to progress table)
+            if let Err(err) = self.db.delete_chapter(chapter_id) {
+                self.set_toast(format!("Failed to delete chapter: {}", err), true);
+                return;
+            }
+
+            // 3. Clean up any in-memory download job for this chapter
+            if let Some(curr_s) = self.current_series() {
+                let s_id = curr_s.series.id;
+                self.download_jobs.retain(|j| {
+                    !(j.series_id == s_id && (j.chapter_number - chapter_number).abs() < f64::EPSILON)
+                });
+            }
+
+            // 4. Reload chapters and series stats
+            let _ = self.reload_chapters();
+            let _ = self.reload_series();
+            self.set_toast(format!("Chapter {:.1} deleted", chapter_number), false);
+        } else {
+            self.clear_pending_deletes();
+            self.pending_delete_chapter_id = Some(chapter_id);
+            self.set_toast(
+                format!("Press Delete again to delete Ch. {:.1}", chapter_number),
+                false,
+            );
         }
     }
 
@@ -2866,5 +2955,142 @@ mod tests {
             app.current_series().unwrap().series.status.as_deref(),
             Some("Completed")
         );
+    }
+
+    #[test]
+    fn test_request_delete_chapter_requires_chapters_pane() {
+        let mut app = test_app();
+        app.active_pane = ActivePane::SeriesList;
+
+        let initial_chap_count = app.chapters_list.len();
+        app.request_delete_chapter();
+
+        assert_eq!(app.pending_delete_chapter_id, None);
+        assert_eq!(app.chapters_list.len(), initial_chap_count);
+        assert!(
+            app.toast
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("Switch to Chapters list")
+        );
+    }
+
+    #[test]
+    fn test_request_delete_chapter_confirmation_and_navigation_reset() {
+        let mut app = test_app();
+        app.select_series_index(0);
+        app.active_pane = ActivePane::ChaptersList;
+        app.select_chapter_index(0);
+
+        let initial_count = app.chapters_list.len();
+        assert!(initial_count > 1);
+        let first_chap_id = app.current_chapter().unwrap().chapter.id;
+
+        // First press: initiates confirmation
+        app.request_delete_chapter();
+        assert_eq!(app.pending_delete_chapter_id, Some(first_chap_id));
+        assert_eq!(app.chapters_list.len(), initial_count);
+        assert!(
+            app.toast
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("Press Delete again")
+        );
+
+        // Navigation clears confirmation
+        app.next_item();
+        assert_eq!(app.pending_delete_chapter_id, None);
+
+        let second_chap_id = app.current_chapter().unwrap().chapter.id;
+        assert_ne!(first_chap_id, second_chap_id);
+
+        // First press on new chapter
+        app.request_delete_chapter();
+        assert_eq!(app.pending_delete_chapter_id, Some(second_chap_id));
+
+        // Second press confirms and deletes
+        app.request_delete_chapter();
+        assert_eq!(app.pending_delete_chapter_id, None);
+        assert_eq!(app.chapters_list.len(), initial_count - 1);
+        assert!(app.toast.as_ref().unwrap().0.contains("deleted"));
+        assert!(
+            app.chapters_list
+                .iter()
+                .all(|c| c.chapter.id != second_chap_id)
+        );
+    }
+
+    #[test]
+    fn test_request_delete_chapter_removes_file_on_disk() {
+        let temp_dir = std::env::temp_dir().join(format!("dewey_del_chap_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let chap_file = temp_dir.join("c001.cbz");
+        std::fs::write(&chap_file, b"test content").unwrap();
+        assert!(chap_file.exists());
+
+        let mut app = test_app();
+        let series_id = app.current_series().unwrap().series.id;
+
+        // Insert chapter with file_path pointing to chap_file
+        app.db
+            .record_chapter_download(series_id, 999.0, chap_file.to_str().unwrap(), Some(10), None)
+            .unwrap();
+        app.reload_chapters().unwrap();
+
+        let idx = app
+            .chapters_list
+            .iter()
+            .position(|c| (c.chapter.chapter_number - 999.0).abs() < f64::EPSILON)
+            .unwrap();
+
+        app.active_pane = ActivePane::ChaptersList;
+        app.select_chapter_index(idx);
+
+        // Press Delete once
+        app.request_delete_chapter();
+        assert!(chap_file.exists());
+
+        // Press Delete again (confirm)
+        app.request_delete_chapter();
+
+        // File should be deleted from disk and database
+        assert!(!chap_file.exists());
+        assert!(
+            app.chapters_list
+                .iter()
+                .all(|c| (c.chapter.chapter_number - 999.0).abs() >= f64::EPSILON)
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_find_series_directory_ignores_external_paths() {
+        let temp_external = std::env::temp_dir().join(format!("dewey_ext_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_external);
+        let ext_chap_file = temp_external.join("c001.cbz");
+        std::fs::write(&ext_chap_file, b"dummy").unwrap();
+
+        let app = test_app();
+        let curr = app.current_series().unwrap().clone();
+
+        // Record a chapter download pointing to the external directory
+        app.db
+            .record_chapter_download(curr.series.id, 888.0, ext_chap_file.to_str().unwrap(), Some(5), None)
+            .unwrap();
+
+        // find_series_directory MUST NOT return temp_external because it is not within app.config.library_dir
+        let found = app.find_series_directory(&curr);
+        if let Some(dir) = found {
+            assert!(
+                dir.starts_with(&app.config.library_dir),
+                "Expected series dir to be inside library_dir, got: {:?}",
+                dir
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_external);
     }
 }
