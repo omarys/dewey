@@ -6,3 +6,8 @@ rtk = "latest"
 
 [env]
 RUST_LOG = "info"
+
+[tasks.in]
+description = "Build and install Dewey"
+depends = ["build"]
+run = "./install.sh"

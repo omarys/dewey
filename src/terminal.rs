@@ -56,6 +56,21 @@ impl Tui {
         Ok(())
     }
 
+    /// Flushes any pending input events from the terminal to prevent keystroke leakage.
+    pub fn flush_input(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::tcflush(std::io::stdin().as_raw_fd(), libc::TCIFLUSH);
+            }
+        }
+        while crossterm::event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+            let _ = crossterm::event::read();
+        }
+        Ok(())
+    }
+
     /// Resumes TUI mode after an external process completes.
     pub fn resume(&mut self) -> Result<()> {
         enable_raw_mode().context("Failed to re-enable raw mode after suspension")?;
@@ -64,6 +79,7 @@ impl Tui {
         self.terminal
             .clear()
             .context("Failed to clear terminal upon resume")?;
+        self.flush_input().ok();
         Ok(())
     }
 

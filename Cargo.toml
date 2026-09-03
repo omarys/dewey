@@ -29,6 +29,7 @@ natord = "1.0"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 anyhow = "1.0"
 thiserror = "2.0"
+libc = "0.2"
 
 # Logging (file-based to avoid corrupting TUI stdout)
 tracing = "0.1"

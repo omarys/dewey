@@ -284,7 +284,9 @@ async fn main() -> Result<()> {
                             (KeyCode::Esc, _) => {
                                 app.exit_search_mode(true);
                             }
-                            (KeyCode::Enter, _) | (KeyCode::Down, _) => {
+                            (KeyCode::Enter, _)
+                            | (KeyCode::Down, _)
+                            | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
                                 app.exit_search_mode(false);
                             }
                             (KeyCode::Backspace, _) => {
@@ -311,10 +313,14 @@ async fn main() -> Result<()> {
                                     app.set_toast(format!("Failed to move series: {}", err), true);
                                 }
                             }
-                            (KeyCode::Down, _) | (KeyCode::Tab, _) => {
+                            (KeyCode::Down, _)
+                            | (KeyCode::Tab, _)
+                            | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
                                 app.category_modal_select_next();
                             }
-                            (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
+                            (KeyCode::Up, _)
+                            | (KeyCode::BackTab, _)
+                            | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
                                 app.category_modal_select_prev();
                             }
                             (KeyCode::Backspace, _) => {
@@ -322,6 +328,45 @@ async fn main() -> Result<()> {
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                                 app.category_modal_push_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    if app.input_mode == app::InputMode::EditSeries {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                app.should_quit = true;
+                            }
+                            (KeyCode::Esc, _) => {
+                                app.close_edit_series_modal();
+                            }
+                            (KeyCode::Enter, _) => {
+                                if let Err(err) = app.save_edit_series_modal() {
+                                    app.set_toast(format!("Failed to save series: {}", err), true);
+                                }
+                            }
+                            (KeyCode::Tab, _) | (KeyCode::Down, _) => {
+                                app.edit_series_next_field();
+                            }
+                            (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
+                                app.edit_series_prev_field();
+                            }
+                            (KeyCode::Left, _) => {
+                                app.edit_series_cycle_left();
+                            }
+                            (KeyCode::Right, _) => {
+                                app.edit_series_cycle_right();
+                            }
+                            (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                                app.edit_series_toggle_active_option();
+                            }
+                            (KeyCode::Backspace, _) => {
+                                app.edit_series_pop_char();
+                            }
+                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                app.edit_series_push_char(c);
                             }
                             _ => {}
                         }
@@ -382,15 +427,24 @@ async fn main() -> Result<()> {
                             app.switch_pane_backward();
                         }
                         (KeyCode::Enter, _) => {
-                            if let Err(err) = app.handle_enter_action(&mut tui) {
+                            if let Err(err) = app.handle_enter_action(&mut tui, &mut event_handler)
+                            {
                                 app.set_toast(format!("Action failed: {}", err), true);
                             }
                         }
                         (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                            app.download_selected_chapter();
+                            if let Err(err) =
+                                app.download_selected_chapter(&mut tui, &mut event_handler)
+                            {
+                                app.set_toast(format!("Fetch failed: {}", err), true);
+                            }
                         }
                         (KeyCode::Char('D'), _) => {
-                            app.download_next_unread_chapter();
+                            if let Err(err) =
+                                app.download_next_unread_chapter(&mut tui, &mut event_handler)
+                            {
+                                app.set_toast(format!("Fetch failed: {}", err), true);
+                            }
                         }
                         (KeyCode::Char('s'), KeyModifiers::NONE) => {
                             app.set_toast("Scanning library in background...", false);
@@ -412,6 +466,18 @@ async fn main() -> Result<()> {
                         (KeyCode::Char('u'), KeyModifiers::NONE) => {
                             app.clear_progress_selected();
                         }
+                        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                            app.page_down(8);
+                        }
+                        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                            app.page_up(8);
+                        }
+                        (KeyCode::Char('f'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
+                            app.page_down(15);
+                        }
+                        (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
+                            app.page_up(15);
+                        }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
                             app.request_delete_selected();
                         }
@@ -420,8 +486,23 @@ async fn main() -> Result<()> {
                                 || app.filter_mode != app::FilterMode::All
                             {
                                 app.clear_search_and_filters();
+                            } else if app.active_pane == app::ActivePane::ChaptersList {
+                                app.active_pane = app::ActivePane::SeriesList;
                             } else {
                                 app.pending_delete_id = None;
+                            }
+                        }
+                        (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                            if let Err(err) = app.add_new_series(&mut tui, &mut event_handler) {
+                                app.set_toast(format!("Add series failed: {}", err), true);
+                            }
+                        }
+                        (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                            app.open_edit_series_modal();
+                        }
+                        (KeyCode::Char('E'), _) => {
+                            if let Err(err) = app.toggle_series_status_selected() {
+                                app.set_toast(format!("Failed to toggle status: {}", err), true);
                             }
                         }
                         (KeyCode::Char('r'), KeyModifiers::NONE) => {
@@ -478,6 +559,98 @@ async fn main() -> Result<()> {
                             // 0. If Help Modal is open, tap dismisses modal and prevents click-through
                             if app.show_help_modal {
                                 app.show_help_modal = false;
+                                continue;
+                            }
+
+                            // 0b. If Edit Series modal is open, route clicks to its buttons
+                            if app.input_mode == app::InputMode::EditSeries {
+                                if let Some(r) = app.edit_save_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        if let Err(err) = app.save_edit_series_modal() {
+                                            app.set_toast(
+                                                format!("Failed to save series: {}", err),
+                                                true,
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                }
+                                if let Some(r) = app.edit_cancel_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.close_edit_series_modal();
+                                        continue;
+                                    }
+                                }
+                                for (r, idx) in &app.edit_status_rects {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.edit_status_idx = *idx;
+                                        app.edit_field_idx = 0;
+                                        break;
+                                    }
+                                }
+                                for (r, idx) in &app.edit_mode_rects {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.edit_reading_mode_idx = *idx;
+                                        app.edit_field_idx = 2;
+                                        break;
+                                    }
+                                }
+                                if let Some(r) = app.edit_title_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.edit_field_idx = 1;
+                                        continue;
+                                    }
+                                }
+                                if let Some(r) = app.edit_category_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.edit_field_idx = 3;
+                                        continue;
+                                    }
+                                }
+                                if let Some(r) = app.edit_fetch_url_rect {
+                                    if x >= r.x
+                                        && x < r.x + r.width
+                                        && y >= r.y
+                                        && y < r.y + r.height
+                                    {
+                                        app.edit_field_idx = 4;
+                                        continue;
+                                    }
+                                }
+                                if let Some(modal_rect) = app.edit_modal_rect {
+                                    if x < modal_rect.x
+                                        || x >= modal_rect.x + modal_rect.width
+                                        || y < modal_rect.y
+                                        || y >= modal_rect.y + modal_rect.height
+                                    {
+                                        app.close_edit_series_modal();
+                                        continue;
+                                    }
+                                }
                                 continue;
                             }
 
@@ -573,15 +746,26 @@ async fn main() -> Result<()> {
                             }) {
                                 match action {
                                     AppAction::Open => {
-                                        if let Err(err) = app.handle_enter_action(&mut tui) {
+                                        if let Err(err) =
+                                            app.handle_enter_action(&mut tui, &mut event_handler)
+                                        {
                                             app.set_toast(format!("Action failed: {}", err), true);
                                         }
                                     }
                                     AppAction::Fetch => {
-                                        app.download_selected_chapter();
+                                        if let Err(err) = app
+                                            .download_selected_chapter(&mut tui, &mut event_handler)
+                                        {
+                                            app.set_toast(format!("Fetch failed: {}", err), true);
+                                        }
                                     }
                                     AppAction::FetchNext => {
-                                        app.download_next_unread_chapter();
+                                        if let Err(err) = app.download_next_unread_chapter(
+                                            &mut tui,
+                                            &mut event_handler,
+                                        ) {
+                                            app.set_toast(format!("Fetch failed: {}", err), true);
+                                        }
                                     }
                                     AppAction::Search => {
                                         app.enter_search_mode();
@@ -635,6 +819,19 @@ async fn main() -> Result<()> {
                                     AppAction::SwitchPane => {
                                         app.switch_pane_forward();
                                     }
+                                    AppAction::AddSeries => {
+                                        if let Err(err) =
+                                            app.add_new_series(&mut tui, &mut event_handler)
+                                        {
+                                            app.set_toast(
+                                                format!("Add series failed: {}", err),
+                                                true,
+                                            );
+                                        }
+                                    }
+                                    AppAction::EditSeries => {
+                                        app.open_edit_series_modal();
+                                    }
                                     AppAction::Help => {
                                         app.show_help_modal = true;
                                     }
@@ -654,8 +851,10 @@ async fn main() -> Result<()> {
                                         if target_idx < app.series_list.len() {
                                             app.select_series_index(target_idx);
                                             if app.handle_tap(ActivePane::SeriesList, target_idx) {
-                                                if let Err(err) = app.handle_enter_action(&mut tui)
-                                                {
+                                                if let Err(err) = app.handle_enter_action(
+                                                    &mut tui,
+                                                    &mut event_handler,
+                                                ) {
                                                     app.set_toast(
                                                         format!("Action failed: {}", err),
                                                         true,
@@ -681,8 +880,10 @@ async fn main() -> Result<()> {
                                             app.select_chapter_index(target_idx);
                                             if app.handle_tap(ActivePane::ChaptersList, target_idx)
                                             {
-                                                if let Err(err) = app.handle_enter_action(&mut tui)
-                                                {
+                                                if let Err(err) = app.handle_enter_action(
+                                                    &mut tui,
+                                                    &mut event_handler,
+                                                ) {
                                                     app.set_toast(
                                                         format!("Action failed: {}", err),
                                                         true,

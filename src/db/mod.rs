@@ -273,6 +273,33 @@ impl Database {
         Ok(())
     }
 
+    /// Marks all chapters of a series as completed.
+    pub fn mark_series_completed(&self, series_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now_str = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO progress (chapter_id, last_page_read, is_completed, last_read_at)
+             SELECT id, COALESCE(page_count, 1), 1, ?2
+             FROM chapters WHERE series_id = ?1
+             ON CONFLICT(chapter_id) DO UPDATE SET
+                last_page_read = excluded.last_page_read,
+                is_completed = 1,
+                last_read_at = ?2",
+            params![series_id, now_str],
+        )?;
+        Ok(())
+    }
+
+    /// Marks all chapters of a series as unread (deletes progress records).
+    pub fn mark_series_unread(&self, series_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM progress WHERE chapter_id IN (SELECT id FROM chapters WHERE series_id = ?1)",
+            params![series_id],
+        )?;
+        Ok(())
+    }
+
     /// Removes a series and, via FK ON DELETE CASCADE, all of its chapters
     /// and progress records.
     pub fn delete_series(&self, series_id: i64) -> Result<()> {
@@ -643,10 +670,9 @@ impl Database {
                     params![category, id],
                 );
             }
-            let _ = conn.execute(
-                "UPDATE series SET is_hidden = ?1 WHERE id = ?2",
-                params![if is_hidden { 1 } else { 0 }, id],
-            );
+            if is_hidden {
+                let _ = conn.execute("UPDATE series SET is_hidden = 1 WHERE id = ?1", params![id]);
+            }
             Ok(id)
         } else {
             conn.execute(
@@ -738,6 +764,15 @@ impl Database {
         conn.execute(
             "UPDATE series SET status = ?1 WHERE id = ?2",
             params![status, series_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_series_title(&self, series_id: i64, title: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE series SET title = ?1, sort_title = ?1 WHERE id = ?2",
+            params![title, series_id],
         )?;
         Ok(())
     }
@@ -1186,6 +1221,77 @@ mod tests {
         assert_eq!(
             chapters[0].chapter.file_path.as_deref(),
             Some("/manga/.Solo/c001.cbz")
+        );
+    }
+
+    #[test]
+    fn test_hidden_folder_defaults_and_manual_hidden_persists_across_scans() {
+        let db = Database::in_memory().unwrap();
+
+        // 1. Series in hidden folder defaults to is_hidden = true
+        let hidden_id = db
+            .insert_or_get_series_with_cover_and_hidden("Hidden Series", None, true)
+            .unwrap();
+        let series = db.get_all_series().unwrap();
+        assert!(
+            series
+                .iter()
+                .find(|s| s.series.id == hidden_id)
+                .unwrap()
+                .series
+                .is_hidden
+        );
+
+        // 2. Series in normal folder defaults to is_hidden = false
+        let normal_id = db
+            .insert_or_get_series_with_cover_and_hidden("Normal Series", None, false)
+            .unwrap();
+        let series = db.get_all_series().unwrap();
+        assert!(
+            !series
+                .iter()
+                .find(|s| s.series.id == normal_id)
+                .unwrap()
+                .series
+                .is_hidden
+        );
+
+        // 3. User manually marks Normal Series as hidden in Dewey
+        db.update_series_hidden(normal_id, true).unwrap();
+        let series = db.get_all_series().unwrap();
+        assert!(
+            series
+                .iter()
+                .find(|s| s.series.id == normal_id)
+                .unwrap()
+                .series
+                .is_hidden
+        );
+
+        // 4. Scanner rescans normal folder (is_hidden = false). The series MUST stay hidden!
+        db.insert_or_get_series_with_cover_and_hidden("Normal Series", None, false)
+            .unwrap();
+        let series = db.get_all_series().unwrap();
+        assert!(
+            series
+                .iter()
+                .find(|s| s.series.id == normal_id)
+                .unwrap()
+                .series
+                .is_hidden
+        );
+
+        // 5. If folder is later moved to a hidden folder (is_hidden = true), it remains/defaults to hidden
+        db.insert_or_get_series_with_cover_and_hidden("Normal Series", None, true)
+            .unwrap();
+        let series = db.get_all_series().unwrap();
+        assert!(
+            series
+                .iter()
+                .find(|s| s.series.id == normal_id)
+                .unwrap()
+                .series
+                .is_hidden
         );
     }
 }

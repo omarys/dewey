@@ -56,15 +56,58 @@ pub enum AppEvent {
 }
 
 pub struct EventHandler {
-    _sender: UnboundedSender<AppEvent>,
+    sender: UnboundedSender<AppEvent>,
     receiver: UnboundedReceiver<AppEvent>,
-    _handler_task: tokio::task::JoinHandle<()>,
+    handler_task: Option<tokio::task::JoinHandle<()>>,
+    tick_rate: Duration,
 }
 
 impl EventHandler {
     pub fn new(tick_rate: Duration) -> (Self, UnboundedSender<AppEvent>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let tx = sender.clone();
+        let mut handler = Self {
+            sender: sender.clone(),
+            receiver,
+            handler_task: None,
+            tick_rate,
+        };
+        handler.resume();
+        (handler, sender)
+    }
+
+    pub async fn next(&mut self) -> Option<AppEvent> {
+        self.receiver.recv().await
+    }
+
+    /// Discards only user input events (such as stray keystrokes or mouse events typed during suspension).
+    /// Preserves background task events (DownloadStarted, DownloadSuccess, DownloadFailed, ScanCompleted, Toast).
+    pub fn drain(&mut self) {
+        let mut preserved = Vec::new();
+        while let Ok(event) = self.receiver.try_recv() {
+            match event {
+                AppEvent::Key(_) | AppEvent::Mouse(_) | AppEvent::Tick => {}
+                other => preserved.push(other),
+            }
+        }
+        for event in preserved {
+            let _ = self.sender.send(event);
+        }
+    }
+
+    /// Suspends background input event streaming so an external child process
+    /// (such as Labrador or Continuum) has exclusive, un-shared access to standard input.
+    pub fn suspend(&mut self) {
+        if let Some(task) = self.handler_task.take() {
+            task.abort();
+        }
+        self.drain();
+    }
+
+    /// Resumes background input event streaming with a clean, newly opened EventStream.
+    pub fn resume(&mut self) {
+        self.drain();
+        let tx = self.sender.clone();
+        let tick_rate = self.tick_rate;
 
         let handler_task = tokio::spawn(async move {
             let mut reader = EventStream::new();
@@ -98,17 +141,6 @@ impl EventHandler {
             }
         });
 
-        (
-            Self {
-                _sender: sender.clone(),
-                receiver,
-                _handler_task: handler_task,
-            },
-            sender,
-        )
-    }
-
-    pub async fn next(&mut self) -> Option<AppEvent> {
-        self.receiver.recv().await
+        self.handler_task = Some(handler_task);
     }
 }

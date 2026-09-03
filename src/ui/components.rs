@@ -640,6 +640,8 @@ pub fn render_action_bar(
         ];
 
         let row2_actions = [
+            ("➕ Add", "a", AppAction::AddSeries),
+            ("✏ Edit", "e", AppAction::EditSeries),
             ("⬇ Fetch", "d", AppAction::Fetch),
             ("📁 Scan", "s", AppAction::Scan),
             ("✓ Mark", "m", AppAction::MarkRead),
@@ -704,6 +706,8 @@ pub fn render_action_bar(
     } else {
         let actions = [
             ("📖 Read", "↵", AppAction::Open),
+            ("➕ Add", "a", AppAction::AddSeries),
+            ("✏ Edit", "e", AppAction::EditSeries),
             ("🔍 Find", "/", AppAction::Search),
             ("⚡ Status", "f", AppAction::Filter),
             ("📚 Type", "T", AppAction::CycleType),
@@ -750,7 +754,7 @@ pub fn render_action_bar(
         }
 
         if let Some((msg, is_error, _)) = &app.toast {
-            spans.push(Span::raw(" | "));
+            spans.push(Span::raw(" "));
             let toast_style = if *is_error {
                 theme.error_badge().add_modifier(Modifier::BOLD)
             } else {
@@ -764,11 +768,12 @@ pub fn render_action_bar(
     }
 }
 
-/// The keyboard shortcut behind each action.
 #[allow(dead_code)]
-fn action_key(action: AppAction) -> &'static str {
+fn action_key_hint(action: AppAction) -> &'static str {
     match action {
         AppAction::Open => "↵",
+        AppAction::AddSeries => "a",
+        AppAction::EditSeries => "e",
         AppAction::Fetch => "d",
         AppAction::FetchNext => "D",
         AppAction::Mode => "M",
@@ -869,6 +874,27 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Launch Continuum reader (or fetch if missing)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  a                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Add new series via Labrador search"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  e                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Edit series details & publication status (Ongoing ↔ Complete)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  E                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Quick-toggle publication status (Ongoing ↔ Complete)"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1109,6 +1135,270 @@ pub fn render_category_modal(f: &mut Frame, app: &mut App, theme: &Theme) {
     .alignment(Alignment::Center)
     .style(Style::default().fg(theme.muted_fg));
     f.render_widget(hints, chunks[3]);
+}
+
+pub fn render_edit_series_modal(f: &mut Frame, app: &mut App, theme: &Theme) {
+    let screen = f.area();
+    let is_portrait = screen.height > screen.width;
+
+    let area = if is_portrait {
+        centered_rect(96, 85, screen)
+    } else {
+        centered_rect(76, 85, screen)
+    };
+    app.edit_modal_rect = Some(area);
+    f.render_widget(Clear, area);
+
+    let series_title = app
+        .current_series()
+        .map(|s| s.series.title.as_str())
+        .unwrap_or("Selected Series");
+
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.active_border())
+        .title(format!(" ✏ Edit Series [{}] ", series_title));
+    f.render_widget(outer_block, area);
+
+    let inner_area = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // 0: Status buttons
+            Constraint::Length(3), // 1: Title input
+            Constraint::Length(3), // 2: Reading mode buttons
+            Constraint::Length(3), // 3: Category input
+            Constraint::Length(3), // 4: Fetch URL input
+            Constraint::Length(3), // 5: Action buttons (Save / Cancel)
+            Constraint::Min(1),    // 6: Hint footer
+        ])
+        .split(inner_area);
+
+    app.edit_status_rects.clear();
+    app.edit_mode_rects.clear();
+
+    // 0: Publication Status row
+    let status_active = app.edit_field_idx == 0;
+    let status_border_style = if status_active {
+        theme.active_border()
+    } else {
+        theme.inactive_border()
+    };
+    let status_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(status_border_style)
+        .title(" 1. Publication Status (Space / ← / → or tap) ");
+
+    let status_inner = status_block.inner(chunks[0]);
+    f.render_widget(status_block, chunks[0]);
+
+    let status_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
+        .split(status_inner);
+
+    for (idx, opt) in crate::app::STATUS_OPTIONS.iter().enumerate() {
+        let is_selected = idx == app.edit_status_idx;
+        app.edit_status_rects.push((status_cols[idx], idx));
+
+        let icon = match *opt {
+            "Completed" => "✔ ",
+            "Ongoing" => "⏳ ",
+            "Hiatus" => "⏸ ",
+            _ => "✖ ",
+        };
+        let label = format!("{}{}", icon, opt);
+
+        let style = if is_selected {
+            if *opt == "Completed" {
+                theme.success_badge().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.highlight_fg)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else {
+            Style::default().fg(theme.fg).bg(theme.highlight_bg)
+        };
+
+        let p = Paragraph::new(label)
+            .alignment(Alignment::Center)
+            .style(style);
+        f.render_widget(p, status_cols[idx]);
+    }
+
+    // 1: Title input row
+    let title_active = app.edit_field_idx == 1;
+    let title_border_style = if title_active {
+        theme.active_border()
+    } else {
+        theme.inactive_border()
+    };
+    app.edit_title_rect = Some(chunks[1]);
+    let title_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(title_border_style)
+        .title(" 2. Series Title ");
+
+    let title_cursor = if title_active { "_" } else { "" };
+    let title_p = Paragraph::new(format!(" {}{}", app.edit_title_input, title_cursor))
+        .block(title_block)
+        .style(Style::default().fg(theme.fg));
+    f.render_widget(title_p, chunks[1]);
+
+    // 2: Reading Mode row
+    let mode_active = app.edit_field_idx == 2;
+    let mode_border_style = if mode_active {
+        theme.active_border()
+    } else {
+        theme.inactive_border()
+    };
+    let mode_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(mode_border_style)
+        .title(" 3. Reading Mode (Space / ← / → or tap) ");
+
+    let mode_inner = mode_block.inner(chunks[2]);
+    f.render_widget(mode_block, chunks[2]);
+
+    let mode_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(mode_inner);
+
+    let mode_labels = [
+        "📖 Manga (Horizontal Continuous)",
+        "📜 Webtoon (Vertical Continuous)",
+    ];
+    for (idx, label) in mode_labels.iter().enumerate() {
+        let is_selected = idx == app.edit_reading_mode_idx;
+        app.edit_mode_rects.push((mode_cols[idx], idx));
+
+        let style = if is_selected {
+            Style::default()
+                .fg(theme.highlight_fg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg).bg(theme.highlight_bg)
+        };
+
+        let p = Paragraph::new(*label)
+            .alignment(Alignment::Center)
+            .style(style);
+        f.render_widget(p, mode_cols[idx]);
+    }
+
+    // 3: Category input row
+    let cat_active = app.edit_field_idx == 3;
+    let cat_border_style = if cat_active {
+        theme.active_border()
+    } else {
+        theme.inactive_border()
+    };
+    app.edit_category_rect = Some(chunks[3]);
+    let cat_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(cat_border_style)
+        .title(" 4. Category Folder (e.g. Manga, Manhwa, Action) ");
+
+    let cat_cursor = if cat_active { "_" } else { "" };
+    let cat_p = Paragraph::new(format!(" {}{}", app.edit_category_input, cat_cursor))
+        .block(cat_block)
+        .style(Style::default().fg(theme.fg));
+    f.render_widget(cat_p, chunks[3]);
+
+    // 4: Fetch URL input row
+    let url_active = app.edit_field_idx == 4;
+    let url_border_style = if url_active {
+        theme.active_border()
+    } else {
+        theme.inactive_border()
+    };
+    app.edit_fetch_url_rect = Some(chunks[4]);
+    let url_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(url_border_style)
+        .title(" 5. Source Fetch URL (Labrador provider link) ");
+
+    let url_cursor = if url_active { "_" } else { "" };
+    let url_p = Paragraph::new(format!(" {}{}", app.edit_fetch_url_input, url_cursor))
+        .block(url_block)
+        .style(Style::default().fg(theme.fg));
+    f.render_widget(url_p, chunks[4]);
+
+    // 5: Save / Cancel buttons row
+    let btn_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[5]);
+
+    app.edit_save_rect = Some(btn_cols[0]);
+    app.edit_cancel_rect = Some(btn_cols[1]);
+
+    let save_active = app.edit_field_idx == 5;
+    let save_border = if save_active {
+        theme.active_border()
+    } else {
+        Style::default().fg(theme.accent)
+    };
+    let save_btn = Paragraph::new(Line::from(vec![Span::styled(
+        "💾 Save Changes [↵]",
+        Style::default()
+            .fg(theme.highlight_fg)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(Alignment::Center)
+    .style(Style::default().bg(theme.accent))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(save_border),
+    );
+    f.render_widget(save_btn, btn_cols[0]);
+
+    let cancel_btn = Paragraph::new(Line::from(vec![Span::styled(
+        "✖ Cancel [Esc]",
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(Alignment::Center)
+    .style(Style::default().bg(theme.highlight_bg))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.muted_fg)),
+    );
+    f.render_widget(cancel_btn, btn_cols[1]);
+
+    // 6: Footer instructions
+    let hints = Paragraph::new(
+        "Tab / ↓: Next Field  •  Shift+Tab / ↑: Prev Field  •  Space: Toggle Option  •  Enter: Save  •  Esc: Cancel",
+    )
+    .alignment(Alignment::Center)
+    .style(Style::default().fg(theme.muted_fg));
+    f.render_widget(hints, chunks[6]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

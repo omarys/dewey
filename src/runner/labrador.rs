@@ -18,6 +18,13 @@ pub struct LabradorResultPayload {
     pub series_fetch_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedSeriesInfo {
+    pub title: String,
+    pub url: String,
+    pub provider: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct LabradorRunner {
     binary_path: PathBuf,
@@ -33,6 +40,96 @@ impl LabradorRunner {
     pub fn new(binary_path: impl Into<PathBuf>) -> Self {
         Self {
             binary_path: binary_path.into(),
+        }
+    }
+
+    pub fn resolve_binary(&self) -> PathBuf {
+        if self.binary_path != Path::new("labrador") && self.binary_path.exists() {
+            return self.binary_path.clone();
+        }
+
+        if let Ok(home) = std::env::var("HOME") {
+            let candidates = [
+                format!("{}/.local/bin/labrador", home),
+                format!("{}/.cargo/bin/labrador", home),
+                format!("{}/go/bin/labrador", home),
+                format!("{}/.local/share/mise/shims/labrador", home),
+            ];
+            for cand in candidates {
+                let p = PathBuf::from(&cand);
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+
+        self.binary_path.clone()
+    }
+
+    /// Launches Labrador's interactive TUI to search all feeds, allowing the user to select
+    /// a series. If query is Some, searches for that title; if None, opens directly in search input.
+    pub fn spawn_interactive_select_series(
+        &self,
+        query: Option<&str>,
+    ) -> Result<Option<SelectedSeriesInfo>> {
+        let temp_path =
+            std::env::temp_dir().join(format!("dewey_labrador_sel_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&temp_path);
+
+        let bin = self.resolve_binary();
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg("select")
+            .arg("--json")
+            .arg("--output-file")
+            .arg(&temp_path);
+
+        if let Some(q) = query {
+            cmd.arg("--query").arg(q);
+        }
+
+        cmd.stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+
+        let status = cmd.status().with_context(|| {
+            format!(
+                "Failed to run {:?}. Ensure labrador is installed.",
+                self.binary_path
+            )
+        })?;
+
+        if !status.success() {
+            let _ = std::fs::remove_file(&temp_path);
+            return Ok(None);
+        }
+
+        if let Ok(content) = std::fs::read_to_string(&temp_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            let trimmed = content.trim();
+            if let Ok(info) = serde_json::from_str::<SelectedSeriesInfo>(trimmed) {
+                if !info.url.is_empty() {
+                    return Ok(Some(info));
+                }
+            }
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                return Ok(Some(SelectedSeriesInfo {
+                    title: query.unwrap_or("").to_string(),
+                    url: trimmed.to_string(),
+                    provider: None,
+                }));
+            }
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
+        Ok(None)
+    }
+
+    /// Launches Labrador's interactive TUI to search all feeds for series_title,
+    /// allowing the user to select the matching series and returning its URL.
+    pub fn spawn_interactive_select(&self, series_title: &str) -> Result<Option<String>> {
+        match self.spawn_interactive_select_series(Some(series_title))? {
+            Some(info) => Ok(Some(info.url)),
+            None => Ok(None),
         }
     }
 
@@ -120,7 +217,8 @@ impl LabradorRunner {
         chapter_number: f64,
         fetch_url: Option<&str>,
     ) -> Result<LabradorResultPayload> {
-        let mut cmd = Command::new(&self.binary_path);
+        let bin = self.resolve_binary();
+        let mut cmd = Command::new(&bin);
         cmd.arg("fetch")
             .arg("--series")
             .arg(series_title)
@@ -131,15 +229,21 @@ impl LabradorRunner {
             cmd.arg("--url").arg(url);
         }
 
-        let output = cmd
-            .output()
-            .await
-            .with_context(|| {
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output()).await {
+            Ok(res) => res.with_context(|| {
                 format!(
                     "Failed to execute Labrador binary at {:?}. Ensure 'labrador' is installed/in PATH.",
                     self.binary_path
                 )
-            })?;
+            })?,
+            Err(_) => {
+                return Err(anyhow!(
+                    "Labrador fetch timed out after 120s for '{}' Ch. {:.1}",
+                    series_title,
+                    chapter_number
+                ));
+            }
+        };
 
         let stdout_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr_str = String::from_utf8_lossy(&output.stderr).trim().to_string();

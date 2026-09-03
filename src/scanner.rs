@@ -547,18 +547,16 @@ impl LibraryScanner {
             "poster.png",
         ];
 
-        for name in &candidates {
-            if let Some(p) = entries.iter().find(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.eq_ignore_ascii_case(name))
-                    .unwrap_or(false)
-            }) {
-                return Some(p.clone());
-            }
-        }
-
-        None
+        candidates.into_iter().find_map(|name| {
+            entries
+                .iter()
+                .find(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                })
+                .cloned()
+        })
     }
 
     fn read_series_json(series_dir: &Path) -> Option<SeriesMetadataParsed> {
@@ -574,8 +572,7 @@ impl LibraryScanner {
         let json_path = entries.iter().find(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.eq_ignore_ascii_case("series.json"))
-                .unwrap_or(false)
+                .is_some_and(|n| n.eq_ignore_ascii_case("series.json"))
         })?;
 
         let content = fs::read_to_string(json_path).ok()?;

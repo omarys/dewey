@@ -9,7 +9,7 @@ use tracing::{error, info};
 use crate::config::Config;
 use crate::db::models::{ChapterWithProgress, SeriesWithStats};
 use crate::db::Database;
-use crate::event::{AppEvent, DownloadSuccessPayload};
+use crate::event::{AppEvent, DownloadSuccessPayload, EventHandler};
 use crate::runner::{ContinuumRunner, LabradorRunner};
 use crate::scanner::LibraryScanner;
 use crate::terminal::Tui;
@@ -27,6 +27,7 @@ pub enum InputMode {
     Normal,
     SearchInput,
     CategoryPicker,
+    EditSeries,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -170,6 +171,8 @@ pub enum AppAction {
     CycleHidden,
     ToggleHidden,
     TagCategory,
+    AddSeries,
+    EditSeries,
     Help,
     Quit,
 }
@@ -234,9 +237,28 @@ pub struct App {
     pub action_rects: Vec<(Rect, AppAction)>,
     /// (time, pane, index) of the previous left-click, for double-tap open.
     pub last_tap: Option<(Instant, ActivePane, usize)>,
+    /// Edit Series Modal State
+    pub edit_series_id: Option<i64>,
+    pub edit_title_input: String,
+    pub edit_status_idx: usize,
+    pub edit_reading_mode_idx: usize,
+    pub edit_category_input: String,
+    pub edit_fetch_url_input: String,
+    pub edit_field_idx: usize,
+    pub edit_modal_rect: Option<Rect>,
+    pub edit_status_rects: Vec<(Rect, usize)>,
+    pub edit_mode_rects: Vec<(Rect, usize)>,
+    pub edit_title_rect: Option<Rect>,
+    pub edit_category_rect: Option<Rect>,
+    pub edit_fetch_url_rect: Option<Rect>,
+    pub edit_save_rect: Option<Rect>,
+    pub edit_cancel_rect: Option<Rect>,
     pub event_tx: UnboundedSender<AppEvent>,
     pub should_quit: bool,
 }
+
+pub const STATUS_OPTIONS: [&str; 4] = ["Ongoing", "Completed", "Hiatus", "Cancelled"];
+pub const MODE_OPTIONS: [&str; 2] = ["manga", "webtoon"];
 
 impl App {
     pub fn new(config: Config, db: Database, event_tx: UnboundedSender<AppEvent>) -> Result<Self> {
@@ -290,6 +312,21 @@ impl App {
             tab_rects: Vec::new(),
             action_rects: Vec::new(),
             last_tap: None,
+            edit_series_id: None,
+            edit_title_input: String::new(),
+            edit_status_idx: 0,
+            edit_reading_mode_idx: 0,
+            edit_category_input: String::new(),
+            edit_fetch_url_input: String::new(),
+            edit_field_idx: 0,
+            edit_modal_rect: None,
+            edit_status_rects: Vec::new(),
+            edit_mode_rects: Vec::new(),
+            edit_title_rect: None,
+            edit_category_rect: None,
+            edit_fetch_url_rect: None,
+            edit_save_rect: None,
+            edit_cancel_rect: None,
             event_tx,
             should_quit: false,
         };
@@ -691,6 +728,349 @@ impl App {
         Ok(())
     }
 
+    pub fn find_series_directory(&self, s: &crate::db::models::SeriesWithStats) -> Option<PathBuf> {
+        let title = &s.series.title;
+
+        // 1. Try file_path of existing chapters in this series
+        if let Ok(chapters) = self.db.get_chapters_for_series(s.series.id) {
+            for c in chapters {
+                if let Some(fp) = &c.chapter.file_path {
+                    let p = PathBuf::from(fp);
+                    if let Some(parent) = p.parent() {
+                        if parent.exists() {
+                            return Some(parent.to_path_buf());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Try cover_path
+        if let Some(cp) = &s.series.cover_path {
+            let p = PathBuf::from(cp);
+            if let Some(parent) = p.parent() {
+                if parent.exists() {
+                    return Some(parent.to_path_buf());
+                }
+            }
+        }
+
+        // 3. Try standard library directory paths
+        let clean_name: String = title
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                _ => c,
+            })
+            .collect();
+        let folder_name = clean_name.trim();
+
+        let candidates = [
+            if let Some(cat) = &s.series.category {
+                self.config.library_dir.join(cat).join(folder_name)
+            } else {
+                self.config.library_dir.join(folder_name)
+            },
+            self.config.library_dir.join("Manga").join(folder_name),
+            self.config.library_dir.join("Manhwa").join(folder_name),
+            self.config.library_dir.join(".Other").join(folder_name),
+            self.config.library_dir.join(folder_name),
+        ];
+
+        candidates.into_iter().find(|cand| cand.exists())
+    }
+
+    /// Toggles the publication status of the selected series (Ongoing ↔ Completed)
+    pub fn toggle_series_status_selected(&mut self) -> Result<()> {
+        let Some(curr) = self.current_series() else {
+            return Ok(());
+        };
+        let series_id = curr.series.id;
+        let title = curr.series.title.clone();
+        let current_status = curr.series.status.as_deref().unwrap_or("Ongoing");
+        let next_status = if current_status.eq_ignore_ascii_case("ongoing") {
+            "Completed"
+        } else {
+            "Ongoing"
+        };
+
+        // 1. Update SQLite
+        self.db.update_series_status(series_id, next_status)?;
+
+        // 2. Update series.json on disk if directory exists
+        let series_dir = self.find_series_directory(curr);
+        if let Some(dir) = series_dir {
+            let json_path = dir.join("series.json");
+            let mut meta: serde_json::Value = if json_path.exists() {
+                std::fs::read_to_string(&json_path)
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok())
+                    .unwrap_or_else(|| serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert(
+                    "status".to_string(),
+                    serde_json::Value::String(next_status.to_string()),
+                );
+                if !obj.contains_key("title") {
+                    obj.insert(
+                        "title".to_string(),
+                        serde_json::Value::String(title.clone()),
+                    );
+                }
+            }
+
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                &json_path,
+                serde_json::to_string_pretty(&meta).unwrap_or_default(),
+            );
+        }
+
+        self.reload_series()?;
+        self.apply_filter();
+        self.set_toast(
+            format!("Series '{}' status marked as {}", title, next_status),
+            false,
+        );
+        Ok(())
+    }
+
+    pub fn open_edit_series_modal(&mut self) {
+        let (series_id, title, current_status, current_mode, category, fetch_url) = {
+            let Some(curr) = self.current_series() else {
+                return;
+            };
+            (
+                curr.series.id,
+                curr.series.title.clone(),
+                curr.series
+                    .status
+                    .clone()
+                    .unwrap_or_else(|| "Ongoing".to_string()),
+                curr.series.reading_mode().to_string(),
+                curr.series.category.clone().unwrap_or_default(),
+                curr.series.fetch_url.clone().unwrap_or_default(),
+            )
+        };
+
+        let status_idx = STATUS_OPTIONS
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(&current_status))
+            .unwrap_or(0);
+        let mode_idx = if current_mode.eq_ignore_ascii_case("webtoon") {
+            1
+        } else {
+            0
+        };
+
+        self.edit_series_id = Some(series_id);
+        self.edit_title_input = title;
+        self.edit_status_idx = status_idx;
+        self.edit_reading_mode_idx = mode_idx;
+        self.edit_category_input = category;
+        self.edit_fetch_url_input = fetch_url;
+        self.edit_field_idx = 0; // Focus on Status first
+        self.input_mode = InputMode::EditSeries;
+    }
+
+    pub fn close_edit_series_modal(&mut self) {
+        self.edit_modal_rect = None;
+        self.edit_status_rects.clear();
+        self.edit_mode_rects.clear();
+        self.edit_title_rect = None;
+        self.edit_category_rect = None;
+        self.edit_fetch_url_rect = None;
+        self.edit_save_rect = None;
+        self.edit_cancel_rect = None;
+        self.edit_series_id = None;
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn save_edit_series_modal(&mut self) -> Result<()> {
+        let Some(series_id) = self.edit_series_id else {
+            self.close_edit_series_modal();
+            return Ok(());
+        };
+
+        let new_status = STATUS_OPTIONS[self.edit_status_idx];
+        let new_mode = MODE_OPTIONS[self.edit_reading_mode_idx];
+        let new_title = self.edit_title_input.trim().to_string();
+        let new_cat = self.edit_category_input.trim().to_string();
+        let new_url = self.edit_fetch_url_input.trim().to_string();
+
+        // 1. Update SQLite DB
+        self.db.update_series_status(series_id, new_status)?;
+        self.db.update_series_reading_mode(series_id, new_mode)?;
+        if !new_title.is_empty() {
+            self.db.update_series_title(series_id, &new_title)?;
+        }
+        let cat_opt = if new_cat.is_empty() {
+            None
+        } else {
+            Some(new_cat.as_str())
+        };
+        self.db.update_series_category(series_id, cat_opt)?;
+        if !new_url.is_empty() {
+            self.db.update_series_fetch_url(series_id, &new_url)?;
+        }
+
+        // 2. Update series.json on disk if directory exists
+        if let Some(s) = self.series_list.iter().find(|s| s.series.id == series_id) {
+            let series_dir = self.find_series_directory(s);
+            if let Some(dir) = series_dir {
+                let json_path = dir.join("series.json");
+                let mut meta: serde_json::Value = if json_path.exists() {
+                    std::fs::read_to_string(&json_path)
+                        .ok()
+                        .and_then(|c| serde_json::from_str(&c).ok())
+                        .unwrap_or_else(|| serde_json::json!({}))
+                } else {
+                    serde_json::json!({})
+                };
+
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert(
+                        "status".to_string(),
+                        serde_json::Value::String(new_status.to_string()),
+                    );
+                    obj.insert(
+                        "reading_mode".to_string(),
+                        serde_json::Value::String(new_mode.to_string()),
+                    );
+                    if !new_title.is_empty() {
+                        obj.insert(
+                            "title".to_string(),
+                            serde_json::Value::String(new_title.clone()),
+                        );
+                    }
+                    if !new_cat.is_empty() {
+                        obj.insert("category".to_string(), serde_json::Value::String(new_cat));
+                    }
+                    if !new_url.is_empty() {
+                        obj.insert("fetch_url".to_string(), serde_json::Value::String(new_url));
+                    }
+                }
+
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    &json_path,
+                    serde_json::to_string_pretty(&meta).unwrap_or_default(),
+                );
+            }
+        }
+
+        let display_title = if !new_title.is_empty() {
+            new_title
+        } else {
+            "Series".to_string()
+        };
+        self.close_edit_series_modal();
+        self.reload_series()?;
+        self.apply_filter();
+        self.set_toast(
+            format!(
+                "Series '{}' updated (status: {})",
+                display_title, new_status
+            ),
+            false,
+        );
+        Ok(())
+    }
+
+    pub fn edit_series_next_field(&mut self) {
+        self.edit_field_idx = (self.edit_field_idx + 1) % 6;
+    }
+
+    pub fn edit_series_prev_field(&mut self) {
+        self.edit_field_idx = (self.edit_field_idx + 5) % 6;
+    }
+
+    pub fn edit_series_cycle_left(&mut self) {
+        match self.edit_field_idx {
+            0 => {
+                self.edit_status_idx =
+                    (self.edit_status_idx + STATUS_OPTIONS.len() - 1) % STATUS_OPTIONS.len();
+            }
+            2 => {
+                self.edit_reading_mode_idx = 1 - self.edit_reading_mode_idx;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn edit_series_cycle_right(&mut self) {
+        match self.edit_field_idx {
+            0 => {
+                self.edit_status_idx = (self.edit_status_idx + 1) % STATUS_OPTIONS.len();
+            }
+            2 => {
+                self.edit_reading_mode_idx = 1 - self.edit_reading_mode_idx;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn edit_series_toggle_active_option(&mut self) {
+        match self.edit_field_idx {
+            0 => {
+                self.edit_status_idx = (self.edit_status_idx + 1) % STATUS_OPTIONS.len();
+            }
+            1 => {
+                self.edit_title_input.push(' ');
+            }
+            2 => {
+                self.edit_reading_mode_idx = 1 - self.edit_reading_mode_idx;
+            }
+            3 => {
+                self.edit_category_input.push(' ');
+            }
+            4 => {
+                self.edit_fetch_url_input.push(' ');
+            }
+            _ => {}
+        }
+    }
+
+    pub fn edit_series_push_char(&mut self, c: char) {
+        match self.edit_field_idx {
+            0 => match c {
+                'c' | 'C' => self.edit_status_idx = 1,
+                'o' | 'O' => self.edit_status_idx = 0,
+                'h' | 'H' => self.edit_status_idx = 2,
+                'x' | 'X' => self.edit_status_idx = 3,
+                _ => {}
+            },
+            1 => self.edit_title_input.push(c),
+            2 => match c {
+                'm' | 'M' => self.edit_reading_mode_idx = 0,
+                'w' | 'W' => self.edit_reading_mode_idx = 1,
+                _ => {}
+            },
+            3 => self.edit_category_input.push(c),
+            4 => self.edit_fetch_url_input.push(c),
+            _ => {}
+        }
+    }
+
+    pub fn edit_series_pop_char(&mut self) {
+        match self.edit_field_idx {
+            1 => {
+                self.edit_title_input.pop();
+            }
+            3 => {
+                self.edit_category_input.pop();
+            }
+            4 => {
+                self.edit_fetch_url_input.pop();
+            }
+            _ => {}
+        }
+    }
+
     pub fn cycle_hidden_filter(&mut self) {
         self.hidden_filter = self.hidden_filter.next();
         self.apply_filter();
@@ -716,99 +1096,10 @@ impl App {
         };
 
         let series_id = current.series.id;
-        let title = &current.series.title;
+        let title = current.series.title.clone();
+        let new_is_hidden = !current.series.is_hidden;
 
-        // Find existing series directory from chapters or cover
-        let chapters = self.db.get_chapters_for_series(series_id)?;
-        let existing_file_dir = chapters
-            .iter()
-            .find_map(|c| c.chapter.file_path.as_deref())
-            .map(Path::new)
-            .filter(|p| p.exists())
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-        let cover_dir = current
-            .series
-            .cover_path
-            .as_deref()
-            .map(Path::new)
-            .filter(|p| p.exists())
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-        let series_dir = existing_file_dir.or(cover_dir).unwrap_or_else(|| {
-            let safe_name = title.replace(' ', "_");
-            if current.series.is_hidden {
-                self.config.library_dir.join(format!(".{}", safe_name))
-            } else {
-                self.config.library_dir.join(safe_name)
-            }
-        });
-
-        let folder_name = series_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let parent_dir = series_dir
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.config.library_dir.clone());
-
-        let rel_path = series_dir
-            .strip_prefix(&self.config.library_dir)
-            .unwrap_or(&series_dir);
-        let in_dot_other = rel_path.starts_with(".Other");
-        let starts_with_dot = folder_name.starts_with('.');
-
-        let (new_dir, new_is_hidden) = if in_dot_other {
-            // Move out of .Other into normal library hierarchy
-            let sub_rel = rel_path.strip_prefix(".Other").unwrap_or(rel_path);
-            let clean_folder = folder_name.trim_start_matches('.');
-            let target_parent_rel = sub_rel.parent().unwrap_or(Path::new(""));
-            let target_parent = self.config.library_dir.join(target_parent_rel);
-            (target_parent.join(clean_folder), false)
-        } else if starts_with_dot {
-            // Dot-prefixed series folder at root or subfolder -> remove dot prefix
-            let clean_name = folder_name.trim_start_matches('.');
-            (parent_dir.join(clean_name), false)
-        } else {
-            // Unhidden -> move into .Other folder structure
-            let target_parent = self
-                .config
-                .library_dir
-                .join(".Other")
-                .join(rel_path.parent().unwrap_or(Path::new("")));
-            (target_parent.join(&folder_name), true)
-        };
-
-        if series_dir.exists() {
-            if new_dir.exists() {
-                let msg = format!("Cannot rename: directory '{:?}' already exists", new_dir);
-                self.set_toast(msg, true);
-                return Ok(());
-            }
-            if let Some(target_parent) = new_dir.parent() {
-                std::fs::create_dir_all(target_parent)
-                    .with_context(|| format!("Failed to create directory {:?}", target_parent))?;
-            }
-            std::fs::rename(&series_dir, &new_dir)
-                .with_context(|| format!("Failed to rename {:?} to {:?}", series_dir, new_dir))?;
-
-            // Clean up old parent directory if empty
-            if let Some(old_parent) = series_dir.parent() {
-                if old_parent != self.config.library_dir
-                    && old_parent != self.config.library_dir.join(".Other")
-                {
-                    let _ = std::fs::remove_dir(old_parent);
-                }
-            }
-
-            self.db
-                .rename_series_directory(series_id, &series_dir, &new_dir, new_is_hidden)?;
-        } else {
-            self.db.update_series_hidden(series_id, new_is_hidden)?;
-        }
-
+        self.db.update_series_hidden(series_id, new_is_hidden)?;
         self.reload_series()?;
         let status_label = if new_is_hidden { "hidden" } else { "unhidden" };
         self.set_toast(
@@ -950,6 +1241,10 @@ impl App {
                 self.toast = None;
             }
         }
+
+        // Clean up any stale background tasks running for more than 120s
+        self.download_jobs
+            .retain(|j| j.started_at.elapsed() < Duration::from_secs(120));
     }
 
     pub fn next_item(&mut self) {
@@ -997,6 +1292,48 @@ impl App {
             ActivePane::ChaptersList => {
                 if !self.chapters_list.is_empty() {
                     self.select_chapter_index(self.chapters_list.len() - 1);
+                }
+            }
+            ActivePane::ActiveDownloads => {}
+        }
+    }
+
+    /// `ctrl+d` / `ctrl+f`: scroll down by a fixed amount of items.
+    pub fn page_down(&mut self, amount: usize) {
+        self.pending_delete_id = None;
+        match self.active_pane {
+            ActivePane::SeriesList => {
+                if !self.filtered_indices.is_empty() {
+                    let new_idx =
+                        (self.selected_series_idx + amount).min(self.filtered_indices.len() - 1);
+                    self.select_series_index(new_idx);
+                }
+            }
+            ActivePane::ChaptersList => {
+                if !self.chapters_list.is_empty() {
+                    let new_idx =
+                        (self.selected_chapter_idx + amount).min(self.chapters_list.len() - 1);
+                    self.select_chapter_index(new_idx);
+                }
+            }
+            ActivePane::ActiveDownloads => {}
+        }
+    }
+
+    /// `ctrl+u` / `ctrl+b`: scroll up by a fixed amount of items.
+    pub fn page_up(&mut self, amount: usize) {
+        self.pending_delete_id = None;
+        match self.active_pane {
+            ActivePane::SeriesList => {
+                if !self.filtered_indices.is_empty() {
+                    let new_idx = self.selected_series_idx.saturating_sub(amount);
+                    self.select_series_index(new_idx);
+                }
+            }
+            ActivePane::ChaptersList => {
+                if !self.chapters_list.is_empty() {
+                    let new_idx = self.selected_chapter_idx.saturating_sub(amount);
+                    self.select_chapter_index(new_idx);
                 }
             }
             ActivePane::ActiveDownloads => {}
@@ -1063,13 +1400,17 @@ impl App {
     }
 
     /// Primary action on selected item (e.g. Enter key)
-    pub fn handle_enter_action(&mut self, tui: &mut Tui) -> Result<()> {
+    pub fn handle_enter_action(
+        &mut self,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
         match self.active_pane {
             ActivePane::SeriesList => {
                 self.active_pane = ActivePane::ChaptersList;
             }
             ActivePane::ChaptersList => {
-                self.read_or_fetch_selected(tui)?;
+                self.read_or_fetch_selected(tui, event_handler)?;
             }
             ActivePane::ActiveDownloads => {}
         }
@@ -1078,7 +1419,11 @@ impl App {
 
     /// Reading Loop execution with Continuum integration.
     /// If the chapter is not downloaded, triggers Labrador fetch automatically.
-    pub fn read_or_fetch_selected(&mut self, tui: &mut Tui) -> Result<()> {
+    pub fn read_or_fetch_selected(
+        &mut self,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
         let current_chap = match self.current_chapter() {
             Some(chap) => chap.clone(),
             None => {
@@ -1096,8 +1441,7 @@ impl App {
 
         if !file_exists {
             // Chapter is not downloaded yet -> Trigger Labrador fetching loop
-            self.download_selected_chapter();
-            return Ok(());
+            return self.download_selected_chapter(tui, event_handler);
         }
 
         let file_path = PathBuf::from(current_chap.chapter.file_path.as_ref().unwrap());
@@ -1127,7 +1471,8 @@ impl App {
             false,
         );
 
-        // 1. Suspend TUI raw mode and alternate screen
+        // 1. Suspend background event stream and TUI terminal mode
+        event_handler.suspend();
         tui.suspend()?;
 
         // 2. Launch Continuum child process & wait for stdout exit payload
@@ -1135,8 +1480,9 @@ impl App {
             self.continuum_runner
                 .spawn_and_wait(&file_path, last_page, Some(&series_mode));
 
-        // 3. Resume TUI terminal mode
+        // 3. Resume TUI terminal mode and fresh background event stream
         tui.resume()?;
+        event_handler.resume();
 
         // 4. Handle exit payload, update SQLite progress, and display completion message
         match result {
@@ -1199,9 +1545,213 @@ impl App {
         Ok(())
     }
 
+    /// Checks whether current series has a fetch_url associated.
+    /// If not, suspends Dewey and runs Labrador interactive series selector.
+    /// Updates series table in SQLite upon selection.
+    pub fn ensure_series_fetch_url(
+        &mut self,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<Option<String>> {
+        let (series_id, series_title, series_url) = match self.current_series() {
+            Some(s) => (
+                s.series.id,
+                s.series.title.clone(),
+                s.series.fetch_url.clone(),
+            ),
+            None => return Ok(None),
+        };
+
+        if let Some(url) = series_url {
+            return Ok(Some(url));
+        }
+
+        info!(series_id, %series_title, "No fetch_url for series; launching Labrador TUI selector");
+        event_handler.suspend();
+        tui.suspend()?;
+        let select_res = self.labrador_runner.spawn_interactive_select(&series_title);
+        tui.resume()?;
+        event_handler.resume();
+
+        match select_res {
+            Ok(Some(url)) => {
+                info!(series_id, %series_title, %url, "Selected series URL; updating SQLite");
+                self.db.update_series_fetch_url(series_id, &url)?;
+                if let Some(s) = self
+                    .series_list
+                    .iter_mut()
+                    .find(|s| s.series.id == series_id)
+                {
+                    s.series.fetch_url = Some(url.clone());
+                }
+                self.set_toast(format!("Associated URL with '{}'", series_title), false);
+                Ok(Some(url))
+            }
+            Ok(None) => {
+                self.set_toast("Series selection cancelled", false);
+                Ok(None)
+            }
+            Err(err) => {
+                error!(series_id, %series_title, %err, "Failed to launch Labrador selector");
+                self.set_toast(format!("Labrador selector error: {}", err), true);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Launches Labrador's interactive TUI to search across providers and add a new series
+    /// to Dewey's SQLite database and library directory.
+    pub fn add_new_series(
+        &mut self,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
+        info!("Launching Labrador TUI to search and add a new series");
+        event_handler.suspend();
+        tui.suspend()?;
+        let select_res = self.labrador_runner.spawn_interactive_select_series(None);
+        tui.resume()?;
+        event_handler.resume();
+
+        match select_res {
+            Ok(Some(info)) => {
+                info!(%info.title, %info.url, ?info.provider, "Selected series from Labrador");
+
+                // 1. Check if series already exists in Dewey
+                let existing_id = self.series_list.iter().find_map(|s| {
+                    if s.series.title.eq_ignore_ascii_case(&info.title)
+                        || s.series.fetch_url.as_deref() == Some(&info.url)
+                    {
+                        Some(s.series.id)
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(id) = existing_id {
+                    if let Some(pos) = self.series_list.iter().position(|s| s.series.id == id) {
+                        self.selected_series_idx = pos;
+                        let _ = self.reload_chapters();
+                    }
+                    self.set_toast(format!("Series '{}' already in library", info.title), false);
+                    return Ok(());
+                }
+
+                // 2. Determine category and reading mode
+                let category = match self.type_filter {
+                    TypeFilter::Manga => Some("Manga".to_string()),
+                    TypeFilter::Manhwa => Some("Manhwa".to_string()),
+                    TypeFilter::Comicbook => Some("Comicbook".to_string()),
+                    TypeFilter::All => Some("Manga".to_string()),
+                };
+                let reading_mode = if info.url.contains("mangakatana")
+                    || info.url.contains("weebcentral")
+                    || info.url.contains("mangadistrict")
+                {
+                    "manga"
+                } else {
+                    "webtoon"
+                };
+
+                // 3. Insert series into SQLite
+                let series_id = self.db.insert_or_get_series_full(
+                    &info.title,
+                    None,
+                    false,
+                    category.as_deref(),
+                )?;
+                self.db.update_series_fetch_url(series_id, &info.url)?;
+                self.db
+                    .update_series_reading_mode(series_id, reading_mode)?;
+
+                // 4. Create series folder on disk & write series.json
+                let clean_name: String = info
+                    .title
+                    .chars()
+                    .map(|c| match c {
+                        '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                        _ => c,
+                    })
+                    .collect();
+                let folder_name = clean_name.trim();
+
+                let series_dir = if let Some(cat) = &category {
+                    self.config.library_dir.join(cat).join(folder_name)
+                } else {
+                    self.config.library_dir.join(folder_name)
+                };
+
+                let _ = std::fs::create_dir_all(&series_dir);
+                let series_json = serde_json::json!({
+                    "title": info.title,
+                    "fetch_url": info.url,
+                    "provider": info.provider,
+                    "reading_mode": reading_mode,
+                });
+                let _ = std::fs::write(
+                    series_dir.join("series.json"),
+                    serde_json::to_string_pretty(&series_json).unwrap_or_default(),
+                );
+
+                // 5. Reload series list and select the newly added series
+                self.reload_series()?;
+                if let Some(pos) = self
+                    .series_list
+                    .iter()
+                    .position(|s| s.series.id == series_id)
+                {
+                    self.selected_series_idx = pos;
+                    let _ = self.reload_chapters();
+                }
+
+                self.set_toast(format!("Added '{}' to library", info.title), false);
+                Ok(())
+            }
+            Ok(None) => {
+                self.set_toast("Series addition cancelled", false);
+                Ok(())
+            }
+            Err(err) => {
+                error!(%err, "Failed to launch Labrador selector for new series");
+                self.set_toast(format!("Labrador selector error: {}", err), true);
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolves the next chapter number to fetch for the current series:
+    /// 1. The first chapter in `chapters_list` where `!is_downloaded()` (missing on disk)
+    /// 2. If `chapters_list` is empty, starts at Chapter 1.0
+    /// 3. If all existing chapters are already downloaded, targets (max_chapter + 1.0)
+    pub fn resolve_next_missing_chapter_number(&self) -> (f64, Option<String>) {
+        if let Some(missing) = self.chapters_list.iter().find(|c| !c.is_downloaded()) {
+            return (
+                missing.chapter.chapter_number,
+                missing.chapter.fetch_url.clone(),
+            );
+        }
+
+        if self.chapters_list.is_empty() {
+            return (1.0, None);
+        }
+
+        let max_chap = self
+            .chapters_list
+            .iter()
+            .map(|c| c.chapter.chapter_number)
+            .fold(0.0, f64::max);
+
+        (max_chap + 1.0, None)
+    }
+
     /// Spawns an asynchronous Labrador fetch for the selected chapter.
-    /// Passes the known fetch_url if available, or lets Labrador discover it.
-    pub fn download_selected_chapter(&mut self) {
+    /// If on series list or chapter list is empty, resolves the next missing chapter.
+    /// Pressing d on a series with no URL opens Labrador TUI immediately to resolve it.
+    pub fn download_selected_chapter(
+        &mut self,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
         let (series_id, series_title, series_url) = match self.current_series() {
             Some(s) => (
                 s.series.id,
@@ -1210,17 +1760,32 @@ impl App {
             ),
             None => {
                 self.set_toast("No series selected", true);
-                return;
+                return Ok(());
             }
         };
 
-        let (chapter_number, chap_url) = match self.current_chapter() {
-            Some(c) => (c.chapter.chapter_number, c.chapter.fetch_url.clone()),
-            None => {
-                self.set_toast("No chapter selected to download", true);
-                return;
+        // If the series has no URL, open Labrador TUI immediately to resolve it,
+        // regardless of missing chapters.
+        let series_url = if series_url.is_none() {
+            match self.ensure_series_fetch_url(tui, event_handler)? {
+                Some(url) => Some(url),
+                None => return Ok(()), // User cancelled
             }
+        } else {
+            series_url
         };
+
+        let (chapter_number, chap_url) =
+            if self.active_pane == ActivePane::ChaptersList && !self.chapters_list.is_empty() {
+                match self.current_chapter() {
+                    Some(c) => (c.chapter.chapter_number, c.chapter.fetch_url.clone()),
+                    None => self.resolve_next_missing_chapter_number(),
+                }
+            } else {
+                self.resolve_next_missing_chapter_number()
+            };
+
+        let effective_url = chap_url.or(series_url);
 
         // Check if already downloading
         if self.download_jobs.iter().any(|j| {
@@ -1230,17 +1795,15 @@ impl App {
                 format!("Chapter {:.1} is already being fetched", chapter_number),
                 false,
             );
-            return;
+            return Ok(());
         }
-
-        let effective_url = chap_url.or(series_url);
 
         let task_id = self.labrador_runner.spawn_fetch(
             self.event_tx.clone(),
             series_id,
             series_title.clone(),
             chapter_number,
-            effective_url.clone(),
+            effective_url,
         );
 
         self.download_jobs.push(DownloadJob {
@@ -1251,23 +1814,24 @@ impl App {
             started_at: Instant::now(),
         });
 
-        let msg = if effective_url.is_some() {
+        self.set_toast(
             format!(
-                "Fetching '{}' Ch. {:.1} from URL...",
+                "Fetching '{}' Ch. {:.1} with Labrador in background...",
                 series_title, chapter_number
-            )
-        } else {
-            format!(
-                "Fetching '{}' Ch. {:.1} with Labrador (resolving URL)...",
-                series_title, chapter_number
-            )
-        };
+            ),
+            false,
+        );
 
-        self.set_toast(msg, false);
+        Ok(())
     }
 
-    /// Triggers download for the next un-downloaded chapter in current series
-    pub fn download_next_unread_chapter(&mut self) {
+    /// Triggers download for the next un-downloaded chapter in current series.
+    /// Pressing D on a series with no URL opens Labrador TUI immediately to resolve it.
+    pub fn download_next_unread_chapter(
+        &mut self,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
         let (series_id, series_title, series_url) = match self.current_series() {
             Some(s) => (
                 s.series.id,
@@ -1276,38 +1840,56 @@ impl App {
             ),
             None => {
                 self.set_toast("No series selected", true);
-                return;
+                return Ok(());
             }
         };
 
-        let next_target = self.chapters_list.iter().find(|c| !c.is_downloaded());
-        if let Some(target) = next_target {
-            let chapter_number = target.chapter.chapter_number;
-            let effective_url = target.chapter.fetch_url.clone().or(series_url);
+        // If the series has no URL, open Labrador TUI immediately to resolve it,
+        // regardless of missing chapters.
+        let series_url = if series_url.is_none() {
+            match self.ensure_series_fetch_url(tui, event_handler)? {
+                Some(url) => Some(url),
+                None => return Ok(()), // User cancelled
+            }
+        } else {
+            series_url
+        };
 
-            let task_id = self.labrador_runner.spawn_fetch(
-                self.event_tx.clone(),
-                series_id,
-                series_title.clone(),
-                chapter_number,
-                effective_url,
-            );
+        let (chapter_number, chap_url) = self.resolve_next_missing_chapter_number();
+        let effective_url = chap_url.or(series_url);
 
-            self.download_jobs.push(DownloadJob {
-                task_id,
-                series_id,
-                series_title: series_title.clone(),
-                chapter_number,
-                started_at: Instant::now(),
-            });
-
+        if self.download_jobs.iter().any(|j| {
+            j.series_id == series_id && (j.chapter_number - chapter_number).abs() < f64::EPSILON
+        }) {
             self.set_toast(
-                format!("Fetching Next Chapter: Ch. {:.1}", chapter_number),
+                format!("Chapter {:.1} is already being fetched", chapter_number),
                 false,
             );
-        } else {
-            self.set_toast("All chapters in this series are already downloaded", false);
+            return Ok(());
         }
+
+        let task_id = self.labrador_runner.spawn_fetch(
+            self.event_tx.clone(),
+            series_id,
+            series_title.clone(),
+            chapter_number,
+            effective_url,
+        );
+
+        self.download_jobs.push(DownloadJob {
+            task_id,
+            series_id,
+            series_title,
+            chapter_number,
+            started_at: Instant::now(),
+        });
+
+        self.set_toast(
+            format!("Fetching Next Chapter: Ch. {:.1}", chapter_number),
+            false,
+        );
+
+        Ok(())
     }
 
     /// Deletes the selected series. Requires a second `x` press on the same
@@ -1358,8 +1940,31 @@ impl App {
         Ok(())
     }
 
-    /// Toggle chapter completed / uncompleted status for the selected chapter.
+    /// Toggle chapter completed / uncompleted status for the selected chapter, or mark series completed if series pane is active.
     pub fn toggle_completed_selected(&mut self) -> Result<()> {
+        if self.active_pane == ActivePane::SeriesList {
+            let series_info = self
+                .current_series()
+                .map(|s| (s.series.id, s.series.title.clone()));
+            if let Some((series_id, title)) = series_info {
+                self.db.mark_series_completed(series_id)?;
+                self.reload_chapters()?;
+                self.reload_series()?;
+                self.set_toast(format!("Series '{}' marked completed [✓]", title), false);
+
+                // Automatically move down to the next series in the list
+                if !self.filtered_indices.is_empty()
+                    && self.selected_series_idx + 1 < self.filtered_indices.len()
+                {
+                    self.selected_series_idx += 1;
+                    self.series_state.select(Some(self.selected_series_idx));
+                    self.selected_chapter_idx = 0;
+                    let _ = self.reload_chapters();
+                }
+            }
+            return Ok(());
+        }
+
         if let Some(chap) = self.current_chapter() {
             let chapter_id = chap.chapter.id;
             let chapter_num = chap.chapter.chapter_number;
@@ -1373,12 +1978,44 @@ impl App {
                 format!("Chapter {:.1} marked uncompleted", chapter_num)
             };
             self.set_toast(msg, false);
+
+            // Automatically move down to the next chapter in the list if marked completed
+            if is_now_completed
+                && !self.chapters_list.is_empty()
+                && self.selected_chapter_idx + 1 < self.chapters_list.len()
+            {
+                self.selected_chapter_idx += 1;
+                self.chapters_state.select(Some(self.selected_chapter_idx));
+            }
         }
         Ok(())
     }
 
-    /// Clears the selected chapter's reading progress (page 0, uncompleted).
+    /// Clears reading progress (page 0, uncompleted), marking chapter or series as unread.
     pub fn clear_progress_selected(&mut self) {
+        if self.active_pane == ActivePane::SeriesList {
+            let series_info = self
+                .current_series()
+                .map(|s| (s.series.id, s.series.title.clone()));
+            if let Some((series_id, title)) = series_info {
+                let _ = self.db.mark_series_unread(series_id);
+                let _ = self.reload_chapters();
+                let _ = self.reload_series();
+                self.set_toast(format!("Series '{}' marked as unread", title), false);
+
+                // Automatically move down to the next series in the list
+                if !self.filtered_indices.is_empty()
+                    && self.selected_series_idx + 1 < self.filtered_indices.len()
+                {
+                    self.selected_series_idx += 1;
+                    self.series_state.select(Some(self.selected_series_idx));
+                    self.selected_chapter_idx = 0;
+                    let _ = self.reload_chapters();
+                }
+            }
+            return;
+        }
+
         if let Some(chap) = self.current_chapter() {
             let chapter_id = chap.chapter.id;
             let chapter_num = chap.chapter.chapter_number;
@@ -1390,6 +2027,14 @@ impl App {
                         format!("Chapter {:.1} marked as unread", chapter_num),
                         false,
                     );
+
+                    // Automatically move down to the next chapter in the list
+                    if !self.chapters_list.is_empty()
+                        && self.selected_chapter_idx + 1 < self.chapters_list.len()
+                    {
+                        self.selected_chapter_idx += 1;
+                        self.chapters_state.select(Some(self.selected_chapter_idx));
+                    }
                 }
                 Err(err) => self.set_toast(format!("Failed to clear progress: {}", err), true),
             }
@@ -1485,8 +2130,10 @@ mod tests {
         let db = Database::in_memory().unwrap();
         db.seed_sample_data_if_empty().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut cfg = Config::default();
-        cfg.auto_scan_on_startup = false; // no tokio runtime in tests
+        let cfg = Config {
+            auto_scan_on_startup: false, // no tokio runtime in tests
+            ..Default::default()
+        };
         App::new(cfg, db, tx).unwrap()
     }
 
@@ -1699,9 +2346,9 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_selected_series_hidden_directory_rename() {
+    fn test_toggle_selected_series_hidden_keeps_directory_in_place() {
         let temp_lib =
-            std::env::temp_dir().join(format!("dewey_app_rename_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("dewey_app_hidden_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_lib);
         std::fs::create_dir_all(&temp_lib).unwrap();
 
@@ -1718,9 +2365,11 @@ mod tests {
             .unwrap();
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut cfg = Config::default();
-        cfg.library_dir = temp_lib.clone();
-        cfg.auto_scan_on_startup = false;
+        let cfg = Config {
+            library_dir: temp_lib.clone(),
+            auto_scan_on_startup: false,
+            ..Default::default()
+        };
         let mut app = App::new(cfg, db, tx).unwrap();
         app.hidden_filter = HiddenFilter::Show;
         app.reload_series().unwrap();
@@ -1729,24 +2378,14 @@ mod tests {
         assert!(!app.series_list[0].series.is_hidden);
         assert!(series_dir.exists());
 
-        // Toggle to hidden
-        app.toggle_selected_series_hidden().unwrap();
-        let hidden_dir = temp_lib.join(".Other").join("My_Manga");
-        assert!(hidden_dir.exists());
-        assert!(!series_dir.exists());
-        assert!(app.series_list[0].series.is_hidden);
-
-        // Chapter file path should be updated in DB
-        let chapters = app.db.get_chapters_for_series(series_id).unwrap();
-        assert_eq!(
-            chapters[0].chapter.file_path.as_deref(),
-            Some(hidden_dir.join("c001.cbz").to_str().unwrap())
-        );
-
-        // Toggle back to unhidden
+        // Toggle to hidden - directory stays in place, DB and App state updated
         app.toggle_selected_series_hidden().unwrap();
         assert!(series_dir.exists());
-        assert!(!hidden_dir.exists());
+        assert!(app.series_list[0].series.is_hidden);
+
+        // Toggle back to unhidden - directory still stays in place
+        app.toggle_selected_series_hidden().unwrap();
+        assert!(series_dir.exists());
         assert!(!app.series_list[0].series.is_hidden);
 
         let _ = std::fs::remove_dir_all(&temp_lib);
@@ -1772,9 +2411,11 @@ mod tests {
             .unwrap();
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut cfg = Config::default();
-        cfg.library_dir = temp_lib.clone();
-        cfg.auto_scan_on_startup = false;
+        let cfg = Config {
+            library_dir: temp_lib.clone(),
+            auto_scan_on_startup: false,
+            ..Default::default()
+        };
         let mut app = App::new(cfg, db, tx).unwrap();
 
         assert_eq!(app.series_list.len(), 1);
@@ -1843,5 +2484,134 @@ mod tests {
         app.close_category_modal();
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.category_modal_rect.is_none());
+    }
+
+    #[test]
+    fn test_chapter_and_series_completion_and_unread_advance_cursor() {
+        let mut app = test_app();
+        app.filter_mode = FilterMode::All;
+        app.apply_filter();
+        app.select_series_index(0);
+
+        // 1. Chapter completion advances cursor
+        app.active_pane = ActivePane::ChaptersList;
+        app.selected_chapter_idx = 0;
+        assert_eq!(app.selected_chapter_idx, 0);
+
+        // Mark ch 100 completed -> cursor should move to ch 101 (idx 1)
+        app.toggle_completed_selected().unwrap();
+        assert_eq!(app.selected_chapter_idx, 1);
+
+        // 2. Chapter unread advances cursor
+        // Move back to chapter 0 and mark unread -> cursor should move to ch 101 (idx 1)
+        app.selected_chapter_idx = 0;
+        app.clear_progress_selected();
+        assert_eq!(app.selected_chapter_idx, 1);
+
+        // 3. Series completion and unread advances cursor in SeriesList
+        app.active_pane = ActivePane::SeriesList;
+        app.selected_series_idx = 0;
+        assert_eq!(app.selected_series_idx, 0);
+
+        let total_series = app.filtered_indices.len();
+        app.toggle_completed_selected().unwrap();
+        if total_series > 1 {
+            assert_eq!(app.selected_series_idx, 1);
+        }
+
+        app.selected_series_idx = 0;
+        app.clear_progress_selected();
+        if total_series > 1 {
+            assert_eq!(app.selected_series_idx, 1);
+        }
+    }
+
+    #[test]
+    fn test_add_new_series_logic() {
+        let mut app = test_app();
+        let initial_count = app.series_list.len();
+
+        let new_title = "Dandadan Test Series";
+        let new_url = "https://mangakatana.com/manga/dandadan-test.123";
+
+        // 1. Insert series
+        let series_id = app
+            .db
+            .insert_or_get_series_full(new_title, None, false, Some("Manga"))
+            .unwrap();
+        app.db.update_series_fetch_url(series_id, new_url).unwrap();
+        app.db
+            .update_series_reading_mode(series_id, "manga")
+            .unwrap();
+
+        // 2. Create directory and series.json
+        let series_dir = app.config.library_dir.join("Manga").join(new_title);
+        std::fs::create_dir_all(&series_dir).unwrap();
+        let meta = serde_json::json!({
+            "title": new_title,
+            "fetch_url": new_url,
+            "provider": "mangakatana",
+            "reading_mode": "manga",
+        });
+        std::fs::write(
+            series_dir.join("series.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+
+        // 3. Reload series
+        app.reload_series().unwrap();
+        assert_eq!(app.series_list.len(), initial_count + 1);
+
+        let added = app
+            .series_list
+            .iter()
+            .find(|s| s.series.title == new_title)
+            .expect("added series must be present");
+        assert_eq!(added.series.fetch_url.as_deref(), Some(new_url));
+        assert_eq!(added.series.reading_mode(), "manga");
+    }
+
+    #[test]
+    fn test_edit_series_modal_status() {
+        let mut app = test_app();
+        app.select_series_index(0);
+        let curr = app.current_series().unwrap();
+        assert_eq!(curr.series.status.as_deref(), Some("Ongoing"));
+
+        // 1. Quick toggle status Ongoing ↔ Completed
+        app.toggle_series_status_selected().unwrap();
+        assert_eq!(
+            app.current_series().unwrap().series.status.as_deref(),
+            Some("Completed")
+        );
+
+        app.toggle_series_status_selected().unwrap();
+        assert_eq!(
+            app.current_series().unwrap().series.status.as_deref(),
+            Some("Ongoing")
+        );
+
+        // 2. Open edit series modal
+        app.open_edit_series_modal();
+        assert_eq!(app.input_mode, InputMode::EditSeries);
+        assert_eq!(app.edit_status_idx, 0); // "Ongoing"
+        assert_eq!(app.edit_field_idx, 0);
+
+        // Toggle status to Completed via Space
+        app.edit_series_toggle_active_option();
+        assert_eq!(app.edit_status_idx, 1); // "Completed"
+
+        // Next field -> Title
+        app.edit_series_next_field();
+        assert_eq!(app.edit_field_idx, 1);
+
+        // Save modal
+        app.save_edit_series_modal().unwrap();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.current_series().unwrap().series.status.as_deref(),
+            Some("Completed")
+        );
     }
 }
