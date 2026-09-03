@@ -34,11 +34,6 @@ repos:
         files: ^scripts/.*\.sh$
   - repo: local
     hooks:
-      - id: mise-upgrade
-        name: Mise upgrade
-        entry: mise upgrade --bump
-        language: system
-        pass_filenames: false
       - id: bash-syntax
         name: Bash syntax check
         entry: bash -n

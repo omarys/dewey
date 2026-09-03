@@ -25,6 +25,17 @@ pub struct SelectedSeriesInfo {
     pub provider: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabradorChapterItem {
+    pub id: String,
+    pub series_id: Option<String>,
+    pub title: String,
+    pub url: String,
+    pub number: Option<f64>,
+    pub index: usize,
+    pub original_label: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct LabradorRunner {
     binary_path: PathBuf,
@@ -133,6 +144,70 @@ impl LabradorRunner {
         }
     }
 
+    /// Fetches the complete remote chapter listing for a series URL via `labrador chapters --url <url> --json`.
+    pub fn fetch_series_chapters(&self, series_url: &str) -> Result<Vec<LabradorChapterItem>> {
+        let bin = self.resolve_binary();
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg("chapters")
+            .arg("--url")
+            .arg(series_url)
+            .arg("--json");
+
+        let output = cmd.output().with_context(|| {
+            format!(
+                "Failed to execute {:?} chapters. Ensure labrador is installed.",
+                self.binary_path
+            )
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Labrador chapters error: {}", stderr));
+        }
+
+        let chapters: Vec<LabradorChapterItem> = serde_json::from_slice(&output.stdout)
+            .context("Failed to parse JSON output from labrador chapters")?;
+
+        Ok(chapters)
+    }
+
+    /// Launches Labrador's interactive TUI directly into the chapter listing for a series,
+    /// allowing the user to view and queue multiple chapter downloads.
+    pub fn spawn_interactive_chapters(
+        &self,
+        series_url: &str,
+        series_title: Option<&str>,
+        output_dir: Option<&Path>,
+    ) -> Result<()> {
+        let bin = self.resolve_binary();
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg("open").arg("--url").arg(series_url);
+
+        if let Some(title) = series_title {
+            cmd.arg("--title").arg(title);
+        }
+        if let Some(out) = output_dir {
+            cmd.arg("--series-dir").arg(out);
+        }
+
+        cmd.stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+
+        let status = cmd.status().with_context(|| {
+            format!(
+                "Failed to run {:?} open. Ensure labrador is installed.",
+                self.binary_path
+            )
+        })?;
+
+        if !status.success() {
+            warn!(?status, "Labrador open exited with non-zero status");
+        }
+
+        Ok(())
+    }
+
     /// Spawns an asynchronous download task using tokio::spawn.
     /// If fetch_url is present, it is passed to Labrador.
     /// If fetch_url is missing, Labrador discovers/resolves it and returns it.
@@ -143,6 +218,7 @@ impl LabradorRunner {
         series_title: String,
         chapter_number: f64,
         fetch_url: Option<String>,
+        series_dir: Option<PathBuf>,
     ) -> u64 {
         let task_id = TASK_COUNTER.fetch_add(1, Ordering::SeqCst);
         let runner = self.clone();
@@ -164,7 +240,12 @@ impl LabradorRunner {
             );
 
             match runner
-                .execute_fetch(&series_title, chapter_number, fetch_url.as_deref())
+                .execute_fetch(
+                    &series_title,
+                    chapter_number,
+                    fetch_url.as_deref(),
+                    series_dir.as_deref(),
+                )
                 .await
             {
                 Ok(result) => {
@@ -216,6 +297,7 @@ impl LabradorRunner {
         series_title: &str,
         chapter_number: f64,
         fetch_url: Option<&str>,
+        series_dir: Option<&Path>,
     ) -> Result<LabradorResultPayload> {
         let bin = self.resolve_binary();
         let mut cmd = Command::new(&bin);
@@ -227,6 +309,10 @@ impl LabradorRunner {
 
         if let Some(url) = fetch_url {
             cmd.arg("--url").arg(url);
+        }
+
+        if let Some(dir) = series_dir {
+            cmd.arg("--series-dir").arg(dir);
         }
 
         let output = match tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output()).await {

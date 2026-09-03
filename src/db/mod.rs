@@ -27,6 +27,13 @@ pub struct ExistingChapterInfo {
 
 pub type ExistingChaptersMap = HashMap<String, ExistingChapterInfo>;
 
+#[derive(Debug, Clone)]
+pub struct RemoteChapterInfo {
+    pub chapter_number: f64,
+    pub title: Option<String>,
+    pub fetch_url: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -455,6 +462,37 @@ impl Database {
                     entry.file_path,
                     entry.page_count,
                 ])?;
+                count += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(count)
+    }
+
+    pub fn batch_insert_placeholder_chapters(
+        &self,
+        series_id: i64,
+        chapters: &[RemoteChapterInfo],
+    ) -> Result<usize> {
+        if chapters.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut count = 0;
+
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO chapters (series_id, chapter_number, file_path, page_count, fetch_url)
+                 VALUES (?1, ?2, NULL, NULL, ?3)
+                 ON CONFLICT(series_id, chapter_number) DO UPDATE SET
+                    fetch_url = COALESCE(?3, fetch_url)",
+            )?;
+
+            for entry in chapters {
+                stmt.execute(params![series_id, entry.chapter_number, entry.fetch_url,])?;
                 count += 1;
             }
         }
@@ -1293,5 +1331,65 @@ mod tests {
                 .series
                 .is_hidden
         );
+    }
+
+    #[test]
+    fn test_placeholder_chapters_and_scan_resolution() {
+        let db = Database::in_memory().unwrap();
+        let s_id = db.insert_or_get_series("Test Series").unwrap();
+
+        // 1. Insert remote placeholder chapters (not downloaded yet)
+        let placeholders = vec![
+            RemoteChapterInfo {
+                chapter_number: 1.0,
+                title: Some("Chapter 1".to_string()),
+                fetch_url: Some("https://example.com/c1".to_string()),
+            },
+            RemoteChapterInfo {
+                chapter_number: 2.0,
+                title: Some("Chapter 2".to_string()),
+                fetch_url: Some("https://example.com/c2".to_string()),
+            },
+        ];
+        let inserted = db
+            .batch_insert_placeholder_chapters(s_id, &placeholders)
+            .unwrap();
+        assert_eq!(inserted, 2);
+
+        // 2. Query chapters: both exist, but neither is downloaded
+        let chapters = db.get_chapters_for_series(s_id).unwrap();
+        assert_eq!(chapters.len(), 2);
+        assert!(!chapters[0].is_downloaded());
+        assert_eq!(
+            chapters[0].chapter.fetch_url.as_deref(),
+            Some("https://example.com/c1")
+        );
+        assert!(!chapters[1].is_downloaded());
+        assert_eq!(
+            chapters[1].chapter.fetch_url.as_deref(),
+            Some("https://example.com/c2")
+        );
+
+        // 3. Local scan records Chapter 1 .cbz
+        let scan_entries = vec![crate::db::ChapterScanEntry {
+            chapter_number: 1.0,
+            file_path: "/tmp/ch1.cbz".to_string(),
+            page_count: Some(20),
+        }];
+        db.batch_record_chapters(s_id, &scan_entries).unwrap();
+
+        // 4. Chapter 1 is now marked with file_path and page_count, while keeping its fetch_url!
+        let updated = db.get_chapters_for_series(s_id).unwrap();
+        assert_eq!(
+            updated[0].chapter.file_path.as_deref(),
+            Some("/tmp/ch1.cbz")
+        );
+        assert_eq!(updated[0].chapter.page_count, Some(20));
+        assert_eq!(
+            updated[0].chapter.fetch_url.as_deref(),
+            Some("https://example.com/c1")
+        );
+        assert!(updated[0].chapter.file_path.is_some());
+        assert_eq!(updated[1].chapter.file_path, None);
     }
 }

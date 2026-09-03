@@ -4,7 +4,7 @@ use ratatui::widgets::{ListState, TableState};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::db::models::{ChapterWithProgress, SeriesWithStats};
@@ -765,17 +765,59 @@ impl App {
             .collect();
         let folder_name = clean_name.trim();
 
-        let candidates = [
-            if let Some(cat) = &s.series.category {
-                self.config.library_dir.join(cat).join(folder_name)
+        let mut candidates = Vec::new();
+        if let Some(cat) = &s.series.category {
+            if s.series.is_hidden {
+                candidates.push(
+                    self.config
+                        .library_dir
+                        .join(".Other")
+                        .join(cat)
+                        .join(folder_name),
+                );
             } else {
-                self.config.library_dir.join(folder_name)
-            },
-            self.config.library_dir.join("Manga").join(folder_name),
-            self.config.library_dir.join("Manhwa").join(folder_name),
-            self.config.library_dir.join(".Other").join(folder_name),
-            self.config.library_dir.join(folder_name),
-        ];
+                candidates.push(self.config.library_dir.join(cat).join(folder_name));
+            }
+        }
+        if s.series.is_hidden {
+            candidates.push(
+                self.config
+                    .library_dir
+                    .join(".Other")
+                    .join("Manga")
+                    .join(folder_name),
+            );
+            candidates.push(
+                self.config
+                    .library_dir
+                    .join(".Other")
+                    .join("Manhwa")
+                    .join(folder_name),
+            );
+            candidates.push(self.config.library_dir.join(".Other").join(folder_name));
+            candidates.push(self.config.library_dir.join("Manga").join(folder_name));
+            candidates.push(self.config.library_dir.join("Manhwa").join(folder_name));
+            candidates.push(self.config.library_dir.join(folder_name));
+        } else {
+            candidates.push(self.config.library_dir.join("Manga").join(folder_name));
+            candidates.push(self.config.library_dir.join("Manhwa").join(folder_name));
+            candidates.push(self.config.library_dir.join(folder_name));
+            candidates.push(
+                self.config
+                    .library_dir
+                    .join(".Other")
+                    .join("Manga")
+                    .join(folder_name),
+            );
+            candidates.push(
+                self.config
+                    .library_dir
+                    .join(".Other")
+                    .join("Manhwa")
+                    .join(folder_name),
+            );
+            candidates.push(self.config.library_dir.join(".Other").join(folder_name));
+        }
 
         candidates.into_iter().find(|cand| cand.exists())
     }
@@ -1097,11 +1139,105 @@ impl App {
 
         let series_id = current.series.id;
         let title = current.series.title.clone();
-        let new_is_hidden = !current.series.is_hidden;
 
-        self.db.update_series_hidden(series_id, new_is_hidden)?;
+        // 1. Locate current series directory
+        let series_dir = self.find_series_directory(&current).unwrap_or_else(|| {
+            let clean_name: String = title
+                .chars()
+                .map(|c| match c {
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    _ => c,
+                })
+                .collect();
+            let folder_name = clean_name.trim();
+            if let Some(cat) = &current.series.category {
+                if current.series.is_hidden {
+                    self.config
+                        .library_dir
+                        .join(".Other")
+                        .join(cat)
+                        .join(folder_name)
+                } else {
+                    self.config.library_dir.join(cat).join(folder_name)
+                }
+            } else if current.series.is_hidden {
+                self.config.library_dir.join(".Other").join(folder_name)
+            } else {
+                self.config.library_dir.join(folder_name)
+            }
+        });
+
+        let folder_name = series_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let parent_dir = series_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.config.library_dir.clone());
+
+        let rel_path = series_dir
+            .strip_prefix(&self.config.library_dir)
+            .unwrap_or(&series_dir);
+        let in_dot_other = rel_path.starts_with(".Other");
+        let starts_with_dot = folder_name.starts_with('.');
+
+        let (new_dir, new_is_hidden) = if in_dot_other {
+            // Move out of .Other into normal library hierarchy
+            let sub_rel = rel_path.strip_prefix(".Other").unwrap_or(rel_path);
+            let clean_folder = folder_name.trim_start_matches('.');
+            let target_parent_rel = sub_rel.parent().unwrap_or(Path::new(""));
+            let target_parent = self.config.library_dir.join(target_parent_rel);
+            (target_parent.join(clean_folder), false)
+        } else if starts_with_dot {
+            // Dot-prefixed series folder at root or subfolder -> remove dot prefix
+            let clean_name = folder_name.trim_start_matches('.');
+            (parent_dir.join(clean_name), false)
+        } else {
+            // Unhidden -> move into .Other folder structure preserving subcategory
+            let target_parent = self
+                .config
+                .library_dir
+                .join(".Other")
+                .join(rel_path.parent().unwrap_or(Path::new("")));
+            (target_parent.join(&folder_name), true)
+        };
+
+        if series_dir.exists() {
+            if new_dir.exists() {
+                let msg = format!("Cannot rename: directory '{:?}' already exists", new_dir);
+                self.set_toast(msg, true);
+                return Ok(());
+            }
+            if let Some(target_parent) = new_dir.parent() {
+                std::fs::create_dir_all(target_parent)
+                    .with_context(|| format!("Failed to create directory {:?}", target_parent))?;
+            }
+            std::fs::rename(&series_dir, &new_dir)
+                .with_context(|| format!("Failed to rename {:?} to {:?}", series_dir, new_dir))?;
+
+            // Clean up old parent directory if empty
+            if let Some(old_parent) = series_dir.parent() {
+                if old_parent != self.config.library_dir
+                    && old_parent != self.config.library_dir.join(".Other")
+                {
+                    let _ = std::fs::remove_dir(old_parent);
+                }
+            }
+
+            self.db
+                .rename_series_directory(series_id, &series_dir, &new_dir, new_is_hidden)?;
+        } else {
+            self.db.update_series_hidden(series_id, new_is_hidden)?;
+        }
+
         self.reload_series()?;
-        let status_label = if new_is_hidden { "hidden" } else { "unhidden" };
+        let status_label = if new_is_hidden {
+            "hidden (moved to .Other)"
+        } else {
+            "unhidden"
+        };
         self.set_toast(
             format!("Series '{}' marked as {}", title, status_label),
             false,
@@ -1584,6 +1720,24 @@ impl App {
                 {
                     s.series.fetch_url = Some(url.clone());
                 }
+
+                if self.chapters_list.is_empty() {
+                    if let Ok(remote_chaps) = self.labrador_runner.fetch_series_chapters(&url) {
+                        let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
+                            .into_iter()
+                            .map(|c| crate::db::RemoteChapterInfo {
+                                chapter_number: c.number.unwrap_or(c.index as f64 + 1.0),
+                                title: Some(c.title),
+                                fetch_url: Some(c.url),
+                            })
+                            .collect();
+                        let _ = self
+                            .db
+                            .batch_insert_placeholder_chapters(series_id, &placeholders);
+                        let _ = self.reload_chapters();
+                    }
+                }
+
                 self.set_toast(format!("Associated URL with '{}'", series_title), false);
                 Ok(Some(url))
             }
@@ -1693,7 +1847,37 @@ impl App {
                     serde_json::to_string_pretty(&series_json).unwrap_or_default(),
                 );
 
-                // 5. Reload series list and select the newly added series
+                // 5. Fetch full remote chapter list from Labrador and record placeholder chapters
+                let mut chapter_count_msg = String::new();
+                match self.labrador_runner.fetch_series_chapters(&info.url) {
+                    Ok(remote_chaps) => {
+                        let count = remote_chaps.len();
+                        chapter_count_msg = format!(" ({} chapters)", count);
+                        let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
+                            .into_iter()
+                            .map(|c| crate::db::RemoteChapterInfo {
+                                chapter_number: c.number.unwrap_or(c.index as f64 + 1.0),
+                                title: Some(c.title),
+                                fetch_url: Some(c.url),
+                            })
+                            .collect();
+                        if let Ok(inserted) = self
+                            .db
+                            .batch_insert_placeholder_chapters(series_id, &placeholders)
+                        {
+                            info!(
+                                series_id,
+                                count = inserted,
+                                "Inserted placeholder chapters into SQLite"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        warn!(%err, "Could not fetch initial chapter listing from provider");
+                    }
+                }
+
+                // 6. Reload series list and select the newly added series
                 self.reload_series()?;
                 if let Some(pos) = self
                     .series_list
@@ -1704,7 +1888,10 @@ impl App {
                     let _ = self.reload_chapters();
                 }
 
-                self.set_toast(format!("Added '{}' to library", info.title), false);
+                self.set_toast(
+                    format!("Added '{}'{} to library", info.title, chapter_count_msg),
+                    false,
+                );
                 Ok(())
             }
             Ok(None) => {
@@ -1752,17 +1939,44 @@ impl App {
         tui: &mut Tui,
         event_handler: &mut EventHandler,
     ) -> Result<()> {
-        let (series_id, series_title, series_url) = match self.current_series() {
-            Some(s) => (
-                s.series.id,
-                s.series.title.clone(),
-                s.series.fetch_url.clone(),
-            ),
+        let curr = match self.current_series() {
+            Some(s) => s.clone(),
             None => {
                 self.set_toast("No series selected", true);
                 return Ok(());
             }
         };
+
+        let series_id = curr.series.id;
+        let series_title = curr.series.title.clone();
+        let series_url = curr.series.fetch_url.clone();
+
+        // 1. Resolve exact series directory on disk
+        let series_dir = self.find_series_directory(&curr).unwrap_or_else(|| {
+            let clean_name: String = series_title
+                .chars()
+                .map(|c| match c {
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    _ => c,
+                })
+                .collect();
+            let folder_name = clean_name.trim();
+            if let Some(cat) = &curr.series.category {
+                if curr.series.is_hidden {
+                    self.config
+                        .library_dir
+                        .join(".Other")
+                        .join(cat)
+                        .join(folder_name)
+                } else {
+                    self.config.library_dir.join(cat).join(folder_name)
+                }
+            } else if curr.series.is_hidden {
+                self.config.library_dir.join(".Other").join(folder_name)
+            } else {
+                self.config.library_dir.join(folder_name)
+            }
+        });
 
         // If the series has no URL, open Labrador TUI immediately to resolve it,
         // regardless of missing chapters.
@@ -1804,6 +2018,7 @@ impl App {
             series_title.clone(),
             chapter_number,
             effective_url,
+            Some(series_dir),
         );
 
         self.download_jobs.push(DownloadJob {
@@ -1827,67 +2042,90 @@ impl App {
 
     /// Triggers download for the next un-downloaded chapter in current series.
     /// Pressing D on a series with no URL opens Labrador TUI immediately to resolve it.
+    #[allow(dead_code)]
     pub fn download_next_unread_chapter(
         &mut self,
         tui: &mut Tui,
         event_handler: &mut EventHandler,
     ) -> Result<()> {
-        let (series_id, series_title, series_url) = match self.current_series() {
-            Some(s) => (
-                s.series.id,
-                s.series.title.clone(),
-                s.series.fetch_url.clone(),
-            ),
+        self.download_selected_chapter(tui, event_handler)
+    }
+
+    /// Launches Labrador's interactive TUI directly into the chapter listing for the current series,
+    /// allowing the user to select and download multiple chapters concurrently.
+    pub fn open_series_in_labrador(
+        &mut self,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
+        let curr = match self.current_series() {
+            Some(s) => s.clone(),
             None => {
                 self.set_toast("No series selected", true);
                 return Ok(());
             }
         };
 
-        // If the series has no URL, open Labrador TUI immediately to resolve it,
-        // regardless of missing chapters.
-        let series_url = if series_url.is_none() {
+        let series_id = curr.series.id;
+        let series_title = curr.series.title.clone();
+        let series_url = curr.series.fetch_url.clone();
+
+        // If the series has no URL, prompt to resolve it first
+        let series_url = if let Some(url) = series_url {
+            url
+        } else {
             match self.ensure_series_fetch_url(tui, event_handler)? {
-                Some(url) => Some(url),
+                Some(url) => url,
                 None => return Ok(()), // User cancelled
             }
-        } else {
-            series_url
         };
 
-        let (chapter_number, chap_url) = self.resolve_next_missing_chapter_number();
-        let effective_url = chap_url.or(series_url);
-
-        if self.download_jobs.iter().any(|j| {
-            j.series_id == series_id && (j.chapter_number - chapter_number).abs() < f64::EPSILON
-        }) {
-            self.set_toast(
-                format!("Chapter {:.1} is already being fetched", chapter_number),
-                false,
-            );
-            return Ok(());
-        }
-
-        let task_id = self.labrador_runner.spawn_fetch(
-            self.event_tx.clone(),
-            series_id,
-            series_title.clone(),
-            chapter_number,
-            effective_url,
-        );
-
-        self.download_jobs.push(DownloadJob {
-            task_id,
-            series_id,
-            series_title,
-            chapter_number,
-            started_at: Instant::now(),
+        // Determine destination folder for downloads: use find_series_directory to find the EXACT directory!
+        let series_dir = self.find_series_directory(&curr).unwrap_or_else(|| {
+            let clean_name: String = series_title
+                .chars()
+                .map(|c| match c {
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    _ => c,
+                })
+                .collect();
+            let folder_name = clean_name.trim();
+            if let Some(cat) = &curr.series.category {
+                if curr.series.is_hidden {
+                    self.config
+                        .library_dir
+                        .join(".Other")
+                        .join(cat)
+                        .join(folder_name)
+                } else {
+                    self.config.library_dir.join(cat).join(folder_name)
+                }
+            } else if curr.series.is_hidden {
+                self.config.library_dir.join(".Other").join(folder_name)
+            } else {
+                self.config.library_dir.join(folder_name)
+            }
         });
+        let _ = std::fs::create_dir_all(&series_dir);
 
-        self.set_toast(
-            format!("Fetching Next Chapter: Ch. {:.1}", chapter_number),
-            false,
+        event_handler.suspend();
+        tui.suspend()?;
+        let res = self.labrador_runner.spawn_interactive_chapters(
+            &series_url,
+            Some(&series_title),
+            Some(&series_dir),
         );
+        tui.resume()?;
+        event_handler.resume();
+
+        if let Err(err) = res {
+            error!(series_id, %series_title, %err, "Failed to launch Labrador chapters");
+            self.set_toast(format!("Labrador error: {}", err), true);
+        } else {
+            self.set_toast("Resumed Dewey; scanning for downloaded chapters...", false);
+            self.spawn_background_scan();
+            let _ = self.reload_chapters();
+        }
 
         Ok(())
     }
@@ -2346,20 +2584,20 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_selected_series_hidden_keeps_directory_in_place() {
+    fn test_toggle_selected_series_hidden_moves_to_dot_other() {
         let temp_lib =
             std::env::temp_dir().join(format!("dewey_app_hidden_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_lib);
         std::fs::create_dir_all(&temp_lib).unwrap();
 
-        let series_dir = temp_lib.join("My_Manga");
+        let series_dir = temp_lib.join("Manga").join("My_Manga");
         std::fs::create_dir_all(&series_dir).unwrap();
         let ch_path = series_dir.join("c001.cbz");
         std::fs::write(&ch_path, b"dummy").unwrap();
 
         let db = Database::in_memory().unwrap();
         let series_id = db
-            .insert_or_get_series_with_cover_and_hidden("My Manga", None, false)
+            .insert_or_get_series_full("My Manga", None, false, Some("Manga"))
             .unwrap();
         db.record_chapter_download(series_id, 1.0, ch_path.to_str().unwrap(), Some(10), None)
             .unwrap();
@@ -2378,15 +2616,30 @@ mod tests {
         assert!(!app.series_list[0].series.is_hidden);
         assert!(series_dir.exists());
 
-        // Toggle to hidden - directory stays in place, DB and App state updated
+        // 1. Toggle to hidden -> moved into .Other/Manga/My_Manga
         app.toggle_selected_series_hidden().unwrap();
-        assert!(series_dir.exists());
+        let hidden_dir = temp_lib.join(".Other").join("Manga").join("My_Manga");
+        assert!(hidden_dir.exists());
+        assert!(!series_dir.exists());
         assert!(app.series_list[0].series.is_hidden);
 
-        // Toggle back to unhidden - directory still stays in place
+        let chapters = app.db.get_chapters_for_series(series_id).unwrap();
+        assert_eq!(
+            chapters[0].chapter.file_path.as_deref(),
+            Some(hidden_dir.join("c001.cbz").to_str().unwrap())
+        );
+
+        // 2. Toggle back to unhidden -> moved back to Manga/My_Manga
         app.toggle_selected_series_hidden().unwrap();
         assert!(series_dir.exists());
+        assert!(!hidden_dir.exists());
         assert!(!app.series_list[0].series.is_hidden);
+
+        let chapters = app.db.get_chapters_for_series(series_id).unwrap();
+        assert_eq!(
+            chapters[0].chapter.file_path.as_deref(),
+            Some(series_dir.join("c001.cbz").to_str().unwrap())
+        );
 
         let _ = std::fs::remove_dir_all(&temp_lib);
     }

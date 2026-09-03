@@ -901,14 +901,14 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  d                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Fetch selected chapter via Labrador"),
+            Span::raw("Fetch selected chapter (or next unread) via Labrador"),
         ]),
         Line::from(vec![
             Span::styled(
                 "  D                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Fetch next unread chapter via Labrador"),
+            Span::raw("Open series in Labrador chapter list (bulk download)"),
         ]),
         Line::from(vec![
             Span::styled(

@@ -441,9 +441,9 @@ async fn main() -> Result<()> {
                         }
                         (KeyCode::Char('D'), _) => {
                             if let Err(err) =
-                                app.download_next_unread_chapter(&mut tui, &mut event_handler)
+                                app.open_series_in_labrador(&mut tui, &mut event_handler)
                             {
-                                app.set_toast(format!("Fetch failed: {}", err), true);
+                                app.set_toast(format!("Labrador error: {}", err), true);
                             }
                         }
                         (KeyCode::Char('s'), KeyModifiers::NONE) => {
@@ -760,11 +760,10 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                     AppAction::FetchNext => {
-                                        if let Err(err) = app.download_next_unread_chapter(
-                                            &mut tui,
-                                            &mut event_handler,
-                                        ) {
-                                            app.set_toast(format!("Fetch failed: {}", err), true);
+                                        if let Err(err) = app
+                                            .open_series_in_labrador(&mut tui, &mut event_handler)
+                                        {
+                                            app.set_toast(format!("Labrador error: {}", err), true);
                                         }
                                     }
                                     AppAction::Search => {
