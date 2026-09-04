@@ -256,6 +256,8 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
         .map(|s| s.series.title.as_str())
         .unwrap_or("No Series Selected");
 
+    let show_title_col = area.width >= 60;
+
     let rows: Vec<Row> = app
         .chapters_list
         .iter()
@@ -307,28 +309,60 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
                 theme.normal_item()
             };
 
-            Row::new(vec![
+            let mut cells = vec![
                 Span::raw(if is_selected { "▶" } else { " " }),
                 Span::styled(num_str, Style::default().add_modifier(Modifier::BOLD)),
-                read_status,
-                file_status,
-            ])
-            .style(row_style)
+            ];
+
+            if show_title_col {
+                let sub = chap.chapter_subtitle().unwrap_or_default();
+                cells.push(Span::styled(sub, Style::default().fg(theme.fg)));
+            }
+
+            cells.push(read_status);
+            cells.push(file_status);
+
+            Row::new(cells).style(row_style)
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(2),
-        Constraint::Length(12),
-        Constraint::Length(18),
-        Constraint::Min(15),
-    ];
-
-    let header = Row::new(vec!["", "Chapter", "Read Progress", "Download Status"]).style(
-        Style::default()
-            .fg(theme.muted_fg)
-            .add_modifier(Modifier::UNDERLINED),
-    );
+    let (header, widths): (Row, Vec<Constraint>) = if show_title_col {
+        (
+            Row::new(vec![
+                "",
+                "Chapter",
+                "Title",
+                "Read Progress",
+                "Download Status",
+            ])
+            .style(
+                Style::default()
+                    .fg(theme.muted_fg)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+            vec![
+                Constraint::Length(2),
+                Constraint::Length(10),
+                Constraint::Min(16),
+                Constraint::Length(16),
+                Constraint::Length(15),
+            ],
+        )
+    } else {
+        (
+            Row::new(vec!["", "Chapter", "Read Progress", "Download Status"]).style(
+                Style::default()
+                    .fg(theme.muted_fg)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+            vec![
+                Constraint::Length(2),
+                Constraint::Length(12),
+                Constraint::Length(18),
+                Constraint::Min(15),
+            ],
+        )
+    };
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -392,7 +426,7 @@ pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) 
             .as_deref()
             .unwrap_or("Not set (Labrador will resolve)");
 
-        vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled("Title:     ", Style::default().fg(theme.muted_fg)),
                 Span::styled(
@@ -452,7 +486,45 @@ pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) 
                     Style::default().fg(theme.success),
                 ),
             ]),
-        ]
+        ];
+
+        // Display selected chapter name/summary
+        if let Some(chap) = app.chapters_list.get(app.selected_chapter_idx) {
+            let num_str = format!("Ch. {:.1}", chap.chapter.chapter_number);
+            let subtitle = chap.chapter_subtitle();
+            let pages_str = match chap.chapter.page_count {
+                Some(p) if p > 0 => format!(" ({} pages)", p),
+                _ => String::new(),
+            };
+
+            let mut chap_spans = vec![
+                Span::styled("Chapter:   ", Style::default().fg(theme.muted_fg)),
+                Span::styled(
+                    num_str,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+
+            if let Some(sub) = subtitle {
+                chap_spans.push(Span::styled(" — ", Style::default().fg(theme.muted_fg)));
+                chap_spans.push(Span::styled(
+                    sub,
+                    Style::default()
+                        .fg(theme.highlight_fg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+
+            if !pages_str.is_empty() {
+                chap_spans.push(Span::styled(pages_str, Style::default().fg(theme.muted_fg)));
+            }
+
+            lines.push(Line::from(chap_spans));
+        }
+
+        lines
     } else {
         vec![Line::from(Span::styled(
             "Select a series to view metadata",

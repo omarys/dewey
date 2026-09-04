@@ -814,16 +814,14 @@ async fn main() -> Result<()> {
                                     AppAction::Reset => {
                                         app.clear_progress_selected();
                                     }
-                                    AppAction::Delete => {
-                                        match app.active_pane {
-                                            app::ActivePane::ChaptersList => {
-                                                app.request_delete_chapter();
-                                            }
-                                            _ => {
-                                                app.request_delete_selected();
-                                            }
+                                    AppAction::Delete => match app.active_pane {
+                                        app::ActivePane::ChaptersList => {
+                                            app.request_delete_chapter();
                                         }
-                                    }
+                                        _ => {
+                                            app.request_delete_selected();
+                                        }
+                                    },
                                     AppAction::SwitchPane => {
                                         app.switch_pane_forward();
                                     }

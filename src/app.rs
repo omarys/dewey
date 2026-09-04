@@ -730,6 +730,36 @@ impl App {
         Ok(())
     }
 
+    pub fn normalize_series_title(title: &str) -> String {
+        let mut clean = String::with_capacity(title.len());
+        let mut in_paren = 0;
+        let mut in_bracket = 0;
+        for c in title.chars() {
+            match c {
+                '(' => in_paren += 1,
+                ')' => {
+                    if in_paren > 0 {
+                        in_paren -= 1;
+                    }
+                }
+                '[' => in_bracket += 1,
+                ']' => {
+                    if in_bracket > 0 {
+                        in_bracket -= 1;
+                    }
+                }
+                _ => {
+                    if in_paren == 0 && in_bracket == 0 && c.is_alphanumeric() {
+                        for lc in c.to_lowercase() {
+                            clean.push(lc);
+                        }
+                    }
+                }
+            }
+        }
+        clean
+    }
+
     pub fn find_series_directory(&self, s: &crate::db::models::SeriesWithStats) -> Option<PathBuf> {
         let title = &s.series.title;
 
@@ -821,7 +851,78 @@ impl App {
             candidates.push(self.config.library_dir.join(".Other").join(folder_name));
         }
 
-        candidates.into_iter().find(|cand| cand.exists())
+        if let Some(cand) = candidates.into_iter().find(|cand| cand.exists()) {
+            return Some(cand);
+        }
+
+        // 4. Fuzzy / normalized matching across potential library locations
+        // Handles cases where disk folders omit colons, punctuation, or parentheticals
+        // (e.g. "Solo Leveling: Ragnarok" matching "Solo Leveling Ragnarok" or
+        // "Boss’s Daughter (Official)" matching "Boss’s Daughter").
+        let norm_target = Self::normalize_series_title(title);
+        if norm_target.is_empty() {
+            return None;
+        }
+
+        let mut search_roots = Vec::new();
+        if let Some(cat) = &s.series.category {
+            if s.series.is_hidden {
+                search_roots.push(self.config.library_dir.join(".Other").join(cat));
+            } else {
+                search_roots.push(self.config.library_dir.join(cat));
+            }
+        }
+        if s.series.is_hidden {
+            search_roots.push(self.config.library_dir.join(".Other").join("Manga"));
+            search_roots.push(self.config.library_dir.join(".Other").join("Manhwa"));
+            search_roots.push(self.config.library_dir.join(".Other"));
+            search_roots.push(self.config.library_dir.join("Manga"));
+            search_roots.push(self.config.library_dir.join("Manhwa"));
+            search_roots.push(self.config.library_dir.clone());
+        } else {
+            search_roots.push(self.config.library_dir.join("Manga"));
+            search_roots.push(self.config.library_dir.join("Manhwa"));
+            search_roots.push(self.config.library_dir.clone());
+            search_roots.push(self.config.library_dir.join(".Other").join("Manga"));
+            search_roots.push(self.config.library_dir.join(".Other").join("Manhwa"));
+            search_roots.push(self.config.library_dir.join(".Other"));
+        }
+
+        for root in search_roots {
+            if !root.is_dir() {
+                continue;
+            }
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() || !path.starts_with(&self.config.library_dir) {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if Self::normalize_series_title(&name_str) == norm_target {
+                        return Some(path);
+                    }
+                    // Check 1 level deeper for subcategories (e.g. .Other/Manhwa/Romance/Series)
+                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for sub_entry in sub_entries.flatten() {
+                            let sub_path = sub_entry.path();
+                            if !sub_path.is_dir() || !sub_path.starts_with(&self.config.library_dir)
+                            {
+                                continue;
+                            }
+                            let sub_name = sub_entry.file_name();
+                            let sub_name_str = sub_name.to_string_lossy();
+                            if Self::normalize_series_title(&sub_name_str) == norm_target {
+                                return Some(sub_path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Toggles the publication status of the selected series (Ongoing ↔ Completed)
@@ -2167,7 +2268,10 @@ impl App {
     /// chapter to confirm; any navigation clears the pending confirmation.
     pub fn request_delete_chapter(&mut self) {
         if self.active_pane != ActivePane::ChaptersList {
-            self.set_toast("Switch to Chapters list (Tab or l) to delete chapters", false);
+            self.set_toast(
+                "Switch to Chapters list (Tab or l) to delete chapters",
+                false,
+            );
             return;
         }
 
@@ -2225,7 +2329,8 @@ impl App {
             if let Some(curr_s) = self.current_series() {
                 let s_id = curr_s.series.id;
                 self.download_jobs.retain(|j| {
-                    !(j.series_id == s_id && (j.chapter_number - chapter_number).abs() < f64::EPSILON)
+                    !(j.series_id == s_id
+                        && (j.chapter_number - chapter_number).abs() < f64::EPSILON)
                 });
             }
 
@@ -2967,13 +3072,12 @@ mod tests {
 
         assert_eq!(app.pending_delete_chapter_id, None);
         assert_eq!(app.chapters_list.len(), initial_chap_count);
-        assert!(
-            app.toast
-                .as_ref()
-                .unwrap()
-                .0
-                .contains("Switch to Chapters list")
-        );
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Switch to Chapters list"));
     }
 
     #[test]
@@ -2991,13 +3095,7 @@ mod tests {
         app.request_delete_chapter();
         assert_eq!(app.pending_delete_chapter_id, Some(first_chap_id));
         assert_eq!(app.chapters_list.len(), initial_count);
-        assert!(
-            app.toast
-                .as_ref()
-                .unwrap()
-                .0
-                .contains("Press Delete again")
-        );
+        assert!(app.toast.as_ref().unwrap().0.contains("Press Delete again"));
 
         // Navigation clears confirmation
         app.next_item();
@@ -3015,16 +3113,16 @@ mod tests {
         assert_eq!(app.pending_delete_chapter_id, None);
         assert_eq!(app.chapters_list.len(), initial_count - 1);
         assert!(app.toast.as_ref().unwrap().0.contains("deleted"));
-        assert!(
-            app.chapters_list
-                .iter()
-                .all(|c| c.chapter.id != second_chap_id)
-        );
+        assert!(app
+            .chapters_list
+            .iter()
+            .all(|c| c.chapter.id != second_chap_id));
     }
 
     #[test]
     fn test_request_delete_chapter_removes_file_on_disk() {
-        let temp_dir = std::env::temp_dir().join(format!("dewey_del_chap_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("dewey_del_chap_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let chap_file = temp_dir.join("c001.cbz");
         std::fs::write(&chap_file, b"test content").unwrap();
@@ -3035,7 +3133,13 @@ mod tests {
 
         // Insert chapter with file_path pointing to chap_file
         app.db
-            .record_chapter_download(series_id, 999.0, chap_file.to_str().unwrap(), Some(10), None)
+            .record_chapter_download(
+                series_id,
+                999.0,
+                chap_file.to_str().unwrap(),
+                Some(10),
+                None,
+            )
             .unwrap();
         app.reload_chapters().unwrap();
 
@@ -3057,18 +3161,18 @@ mod tests {
 
         // File should be deleted from disk and database
         assert!(!chap_file.exists());
-        assert!(
-            app.chapters_list
-                .iter()
-                .all(|c| (c.chapter.chapter_number - 999.0).abs() >= f64::EPSILON)
-        );
+        assert!(app
+            .chapters_list
+            .iter()
+            .all(|c| (c.chapter.chapter_number - 999.0).abs() >= f64::EPSILON));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_find_series_directory_ignores_external_paths() {
-        let temp_external = std::env::temp_dir().join(format!("dewey_ext_test_{}", std::process::id()));
+        let temp_external =
+            std::env::temp_dir().join(format!("dewey_ext_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_external);
         let ext_chap_file = temp_external.join("c001.cbz");
         std::fs::write(&ext_chap_file, b"dummy").unwrap();
@@ -3078,7 +3182,13 @@ mod tests {
 
         // Record a chapter download pointing to the external directory
         app.db
-            .record_chapter_download(curr.series.id, 888.0, ext_chap_file.to_str().unwrap(), Some(5), None)
+            .record_chapter_download(
+                curr.series.id,
+                888.0,
+                ext_chap_file.to_str().unwrap(),
+                Some(5),
+                None,
+            )
             .unwrap();
 
         // find_series_directory MUST NOT return temp_external because it is not within app.config.library_dir
@@ -3092,5 +3202,47 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&temp_external);
+    }
+
+    #[test]
+    fn test_find_series_directory_fuzzy_normalization() {
+        let app = test_app();
+        let curr = app.current_series().unwrap().clone();
+
+        // Create a folder on disk omitting punctuation/colons: e.g. "Solo Leveling Ragnarok"
+        let folder = app
+            .config
+            .library_dir
+            .join("Manhwa")
+            .join("Solo Leveling Ragnarok");
+        std::fs::create_dir_all(&folder).unwrap();
+
+        let mut s = curr.clone();
+        s.series.title = "Solo Leveling: Ragnarok".to_string();
+        s.series.category = Some("Manhwa".to_string());
+        s.series.is_hidden = false;
+
+        let found = app.find_series_directory(&s);
+        assert_eq!(found, Some(folder.clone()));
+
+        // Also test parenthetical matching: "Boss’s Daughter (Official)" -> folder "Boss's Daughter"
+        let folder2 = app
+            .config
+            .library_dir
+            .join("Manhwa")
+            .join("Boss's Daughter");
+        std::fs::create_dir_all(&folder2).unwrap();
+
+        s.series.title = "Boss's Daughter (Official)".to_string();
+        let found2 = app.find_series_directory(&s);
+        assert_eq!(found2, Some(folder2));
+
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(
+            &app.config
+                .library_dir
+                .join("Manhwa")
+                .join("Boss's Daughter"),
+        );
     }
 }
