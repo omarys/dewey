@@ -852,7 +852,7 @@ fn action_key_hint(action: AppAction) -> &'static str {
         AppAction::MarkRead => "m",
         AppAction::Scan => "s",
         AppAction::Reset => "u",
-        AppAction::Delete => "x",
+        AppAction::Delete => "Shift+Del",
         AppAction::SwitchPane => "Tab",
         AppAction::Search => "/",
         AppAction::Filter => "f",
@@ -1012,7 +1012,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  x                     ",
+                "  Shift+Delete          ",
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Delete selected series (press twice to confirm)"),

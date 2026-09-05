@@ -2239,27 +2239,79 @@ impl App {
         Ok(())
     }
 
-    /// Deletes the selected series. Requires a second `x` press on the same
+    /// Deletes the selected series. Requires a second `Shift+Delete` press on the same
     /// series to confirm; any navigation clears the pending confirmation.
     pub fn request_delete_selected(&mut self) {
-        let current_id = self.current_series().map(|s| s.series.id);
+        let current_series = self.current_series().cloned();
+        let current_id = current_series.as_ref().map(|s| s.series.id);
+
+        let id = match current_id {
+            Some(id) => id,
+            None => {
+                self.set_toast("No series selected to delete", false);
+                return;
+            }
+        };
 
         // Second press on the same series -> confirm and delete.
-        if self.pending_delete_id.is_some() && self.pending_delete_id == current_id {
+        if self.pending_delete_id == Some(id) {
             self.clear_pending_deletes();
-            match self.db.delete_series(current_id.unwrap()) {
+
+            // 1. Remove physical files/directory on disk if within library_dir
+            if let Some(ref curr_s) = current_series {
+                if let Some(s_dir) = self.find_series_directory(curr_s) {
+                    if s_dir.exists()
+                        && s_dir.starts_with(&self.config.library_dir)
+                        && s_dir != self.config.library_dir
+                        && s_dir != self.config.library_dir.join(".Other")
+                        && s_dir != self.config.library_dir.join("Manga")
+                        && s_dir != self.config.library_dir.join("Manhwa")
+                    {
+                        if let Err(err) = std::fs::remove_dir_all(&s_dir) {
+                            self.set_toast(format!("Failed to delete series directory: {}", err), true);
+                            return;
+                        }
+
+                        // Clean up parent directory if empty
+                        if let Some(parent) = s_dir.parent() {
+                            if parent != self.config.library_dir
+                                && parent != self.config.library_dir.join(".Other")
+                                && parent != self.config.library_dir.join("Manga")
+                                && parent != self.config.library_dir.join("Manhwa")
+                            {
+                                let _ = std::fs::remove_dir(parent);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Clean up any in-memory download jobs for this series
+            self.download_jobs.retain(|j| j.series_id != id);
+
+            // 3. Remove record from database (cascades to chapters and progress)
+            let series_title = current_series
+                .as_ref()
+                .map(|s| s.series.title.clone())
+                .unwrap_or_default();
+
+            match self.db.delete_series(id) {
                 Ok(()) => {
+                    self.active_pane = ActivePane::SeriesList;
                     let _ = self.reload_series();
                     let _ = self.reload_chapters();
-                    self.set_toast("Series removed from library", false);
+                    self.set_toast(format!("Series '{}' deleted", series_title), false);
                 }
                 Err(err) => self.set_toast(format!("Failed to delete series: {}", err), true),
             }
         } else {
             self.clear_pending_deletes();
-            self.pending_delete_id = current_id;
-            if current_id.is_some() {
-                self.set_toast("Press x again to delete this series", false);
+            self.pending_delete_id = Some(id);
+            if let Some(ref s) = current_series {
+                self.set_toast(
+                    format!("Press Shift+Delete again to delete '{}'", s.series.title),
+                    false,
+                );
             }
         }
     }
@@ -3165,6 +3217,85 @@ mod tests {
             .chapters_list
             .iter()
             .all(|c| (c.chapter.chapter_number - 999.0).abs() >= f64::EPSILON));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_request_delete_series_confirmation_and_navigation_reset() {
+        let mut app = test_app();
+        app.select_series_index(0);
+        let initial_count = app.series_list.len();
+        assert!(initial_count > 1);
+        let first_id = app.current_series().unwrap().series.id;
+
+        // First press: initiates confirmation
+        app.request_delete_selected();
+        assert_eq!(app.pending_delete_id, Some(first_id));
+        assert_eq!(app.series_list.len(), initial_count);
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Press Shift+Delete again"));
+
+        // Navigation clears confirmation
+        app.next_item();
+        assert_eq!(app.pending_delete_id, None);
+
+        let second_id = app.current_series().unwrap().series.id;
+        assert_ne!(first_id, second_id);
+
+        // First press on new series
+        app.request_delete_selected();
+        assert_eq!(app.pending_delete_id, Some(second_id));
+
+        // Second press confirms and deletes
+        app.request_delete_selected();
+        assert_eq!(app.pending_delete_id, None);
+        assert_eq!(app.series_list.len(), initial_count - 1);
+        assert!(app.toast.as_ref().unwrap().0.contains("deleted"));
+        assert!(app.series_list.iter().all(|s| s.series.id != second_id));
+    }
+
+    #[test]
+    fn test_request_delete_series_removes_directory_on_disk() {
+        let mut app = test_app();
+        let temp_dir =
+            std::env::temp_dir().join(format!("dewey_del_series_test_{}", std::process::id()));
+        app.config.library_dir = temp_dir.clone();
+        let series_dir = temp_dir.join("Manga").join("Test Series");
+        std::fs::create_dir_all(&series_dir).unwrap();
+        let chap_file = series_dir.join("c001.cbz");
+        std::fs::write(&chap_file, b"test content").unwrap();
+        assert!(series_dir.exists());
+
+        // Insert new series
+        let series_id = app.db.insert_or_get_series("Test Series").unwrap();
+        app.db.update_series_category(series_id, Some("Manga")).unwrap();
+        app.db
+            .record_chapter_download(series_id, 1.0, chap_file.to_str().unwrap(), Some(1), None)
+            .unwrap();
+        app.reload_series().unwrap();
+
+        let idx = app
+            .filtered_indices
+            .iter()
+            .position(|&i| app.series_list[i].series.id == series_id)
+            .unwrap();
+        app.select_series_index(idx);
+
+        // Press Shift+Delete once
+        app.request_delete_selected();
+        assert!(series_dir.exists());
+
+        // Press Shift+Delete again (confirm)
+        app.request_delete_selected();
+
+        // Directory on disk and DB record should both be removed
+        assert!(!series_dir.exists());
+        assert!(app.series_list.iter().all(|s| s.series.id != series_id));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

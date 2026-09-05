@@ -478,11 +478,22 @@ async fn main() -> Result<()> {
                         (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
                             app.page_up(15);
                         }
-                        (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                        (KeyCode::Delete, mods) if mods.contains(KeyModifiers::SHIFT) => {
                             app.request_delete_selected();
                         }
                         (KeyCode::Delete, _) => {
-                            app.request_delete_chapter();
+                            if app.active_pane == app::ActivePane::ChaptersList {
+                                app.request_delete_chapter();
+                            } else {
+                                app.set_toast("Press Shift+Delete to delete a series", false);
+                            }
+                        }
+                        (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                            if app.active_pane == app::ActivePane::ChaptersList {
+                                app.request_delete_chapter();
+                            } else {
+                                app.set_toast("Press Shift+Delete to delete a series", false);
+                            }
                         }
                         (KeyCode::Esc, _) => {
                             app.clear_pending_deletes();
