@@ -190,13 +190,13 @@ impl LibraryScanner {
                 }
             }
 
-            // Check if series has any remaining chapters or fetch_url
+            // Check if series has any remaining chapters or discovered directory
             let remaining = db.get_chapters_for_series(s.series.id)?;
             let is_discovered = discovered_map
                 .values()
                 .any(|t| t.eq_ignore_ascii_case(&s.series.title));
 
-            if remaining.is_empty() && s.series.fetch_url.is_none() && !is_discovered {
+            if remaining.is_empty() && !is_discovered {
                 let _ = db.delete_series(s.series.id);
                 removed += 1;
             }
@@ -578,16 +578,24 @@ impl LibraryScanner {
         let content = fs::read_to_string(json_path).ok()?;
         let parsed: Value = serde_json::from_str(&content).ok()?;
 
-        let meta_obj = parsed.get("metadata").unwrap_or(&parsed);
-
-        let name = meta_obj
-            .get("name")
-            .or_else(|| meta_obj.get("title"))
+        // Root fields take precedence because Dewey writes user customizations at root level.
+        // Nested "metadata" (e.g. from Anilist or ComicRack imports) serves as fallback.
+        let name = parsed
+            .get("title")
+            .or_else(|| parsed.get("name"))
+            .or_else(|| {
+                parsed.get("metadata").and_then(|m| {
+                    m.get("name").or_else(|| m.get("title"))
+                })
+            })
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let status = meta_obj
+        let status = parsed
             .get("status")
+            .or_else(|| {
+                parsed.get("metadata").and_then(|m| m.get("status"))
+            })
             .and_then(|v| v.as_str())
             .map(|s| match s {
                 "Continuing" => "Ongoing".to_string(),
@@ -595,10 +603,17 @@ impl LibraryScanner {
                 other => other.to_string(),
             });
 
-        let fetch_url = meta_obj
+        let fetch_url = parsed
             .get("fetch_url")
-            .or_else(|| meta_obj.get("url"))
-            .or_else(|| meta_obj.get("source_url"))
+            .or_else(|| parsed.get("url"))
+            .or_else(|| parsed.get("source_url"))
+            .or_else(|| {
+                parsed.get("metadata").and_then(|m| {
+                    m.get("fetch_url")
+                        .or_else(|| m.get("url"))
+                        .or_else(|| m.get("source_url"))
+                })
+            })
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -1061,6 +1076,65 @@ mod tests {
         assert!(!titles.contains(&"Manga".to_string()));
         assert!(!titles.contains(&"Manhwa".to_string()));
         assert!(!titles.contains(&"Action".to_string()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_series_json_root_title_overrides_nested_metadata() {
+        let root = std::env::temp_dir().join(format!("dewey_root_title_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let series_dir = root.join("Solo Leveling");
+        std::fs::create_dir_all(&series_dir).unwrap();
+        std::fs::write(series_dir.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        // series.json with root title "Solo Leveling", but nested metadata "Solo Leveling (Volume)"
+        let json_content = r#"{
+            "title": "Solo Leveling",
+            "status": "Completed",
+            "metadata": {
+                "name": "Solo Leveling (Volume)",
+                "status": "Ended"
+            }
+        }"#;
+        std::fs::write(series_dir.join("series.json"), json_content).unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
+
+        assert_eq!(summary.series_found, 1);
+        let series = db.get_all_series().unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].series.title, "Solo Leveling");
+        assert_eq!(series[0].series.status.as_deref(), Some("Completed"));
+        assert_eq!(series[0].stats.total_chapters, 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_cleanup_stale_records_removes_old_empty_series() {
+        let root = std::env::temp_dir().join(format!("dewey_stale_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let series_dir = root.join("Solo Leveling");
+        std::fs::create_dir_all(&series_dir).unwrap();
+        std::fs::write(series_dir.join("c001.cbz"), b"fake_cbz").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        // Insert old series that no longer exists on disk
+        let old_id = db.insert_or_get_series("Solo Leveling (Volume)").unwrap();
+        db.update_series_fetch_url(old_id, "https://example.com").unwrap();
+
+        // Run scanner
+        let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
+
+        assert_eq!(summary.series_found, 1);
+        let all = db.get_all_series().unwrap();
+        // The old series with 0 chapters and no disk folder should be deleted!
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].series.title, "Solo Leveling");
 
         let _ = std::fs::remove_dir_all(&root);
     }

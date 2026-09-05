@@ -1047,6 +1047,8 @@ impl App {
         let new_cat = self.edit_category_input.trim().to_string();
         let new_url = self.edit_fetch_url_input.trim().to_string();
 
+        let curr_series = self.series_list.iter().find(|s| s.series.id == series_id).cloned();
+
         // 1. Update SQLite DB
         self.db.update_series_status(series_id, new_status)?;
         self.db.update_series_reading_mode(series_id, new_mode)?;
@@ -1063,49 +1065,95 @@ impl App {
             self.db.update_series_fetch_url(series_id, &new_url)?;
         }
 
-        // 2. Update series.json on disk if directory exists
-        if let Some(s) = self.series_list.iter().find(|s| s.series.id == series_id) {
+        // 2. If title changed, rename directory on disk if it matches old title/folder
+        let mut active_dir = None;
+        if let Some(ref s) = curr_series {
             let series_dir = self.find_series_directory(s);
             if let Some(dir) = series_dir {
-                let json_path = dir.join("series.json");
-                let mut meta: serde_json::Value = if json_path.exists() {
-                    std::fs::read_to_string(&json_path)
-                        .ok()
-                        .and_then(|c| serde_json::from_str(&c).ok())
-                        .unwrap_or_else(|| serde_json::json!({}))
-                } else {
-                    serde_json::json!({})
-                };
+                active_dir = Some(dir.clone());
+                if !new_title.is_empty() && new_title != s.series.title {
+                    let clean_name: String = new_title
+                        .chars()
+                        .map(|c| match c {
+                            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                            _ => c,
+                        })
+                        .collect();
+                    let new_folder_name = clean_name.trim();
 
-                if let Some(obj) = meta.as_object_mut() {
+                    if let Some(parent) = dir.parent() {
+                        let new_dir = parent.join(new_folder_name);
+                        if dir != new_dir && dir.exists() && !new_dir.exists() {
+                            if let Ok(()) = std::fs::rename(&dir, &new_dir) {
+                                active_dir = Some(new_dir.clone());
+                                let is_hidden = s.series.is_hidden;
+                                let _ = self.db.rename_series_directory(
+                                    series_id,
+                                    &dir,
+                                    &new_dir,
+                                    is_hidden,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Update series.json on disk in active_dir
+        if let Some(dir) = active_dir {
+            let json_path = dir.join("series.json");
+            let mut meta: serde_json::Value = if json_path.exists() {
+                std::fs::read_to_string(&json_path)
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok())
+                    .unwrap_or_else(|| serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert(
+                    "status".to_string(),
+                    serde_json::Value::String(new_status.to_string()),
+                );
+                obj.insert(
+                    "reading_mode".to_string(),
+                    serde_json::Value::String(new_mode.to_string()),
+                );
+                if !new_title.is_empty() {
                     obj.insert(
-                        "status".to_string(),
-                        serde_json::Value::String(new_status.to_string()),
+                        "title".to_string(),
+                        serde_json::Value::String(new_title.clone()),
                     );
                     obj.insert(
-                        "reading_mode".to_string(),
-                        serde_json::Value::String(new_mode.to_string()),
+                        "name".to_string(),
+                        serde_json::Value::String(new_title.clone()),
                     );
-                    if !new_title.is_empty() {
-                        obj.insert(
+                    if let Some(sub_meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                        sub_meta.insert(
+                            "name".to_string(),
+                            serde_json::Value::String(new_title.clone()),
+                        );
+                        sub_meta.insert(
                             "title".to_string(),
                             serde_json::Value::String(new_title.clone()),
                         );
                     }
-                    if !new_cat.is_empty() {
-                        obj.insert("category".to_string(), serde_json::Value::String(new_cat));
-                    }
-                    if !new_url.is_empty() {
-                        obj.insert("fetch_url".to_string(), serde_json::Value::String(new_url));
-                    }
                 }
-
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(
-                    &json_path,
-                    serde_json::to_string_pretty(&meta).unwrap_or_default(),
-                );
+                if !new_cat.is_empty() {
+                    obj.insert("category".to_string(), serde_json::Value::String(new_cat));
+                }
+                if !new_url.is_empty() {
+                    obj.insert("fetch_url".to_string(), serde_json::Value::String(new_url));
+                }
             }
+
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                &json_path,
+                serde_json::to_string_pretty(&meta).unwrap_or_default(),
+            );
         }
 
         let display_title = if !new_title.is_empty() {
