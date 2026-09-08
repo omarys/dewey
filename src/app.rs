@@ -340,6 +340,12 @@ impl App {
         }
         app.reload_series()?;
         app.reload_chapters()?;
+        app.selected_chapter_idx = app.find_resume_chapter_index();
+        if app.chapters_list.is_empty() {
+            app.chapters_state.select(None);
+        } else {
+            app.chapters_state.select(Some(app.selected_chapter_idx));
+        }
 
         // 2. Spawn non-blocking background scan if auto_scan_on_startup is true
         if app.config.auto_scan_on_startup && app.config.library_dir.exists() {
@@ -1472,6 +1478,35 @@ impl App {
         Ok(())
     }
 
+    /// Finds the index of the chapter where the user left off:
+    /// 1. The first in-progress chapter (partially read, not completed)
+    /// 2. Or the first uncompleted chapter
+    /// 3. Defaults to 0 if all completed or empty.
+    pub fn find_resume_chapter_index(&self) -> usize {
+        if self.chapters_list.is_empty() {
+            return 0;
+        }
+
+        // 1. Look for in-progress chapter
+        if let Some(idx) = self.chapters_list.iter().position(|c| {
+            if let Some(p) = &c.progress {
+                !p.is_completed && p.last_page_read > 0
+            } else {
+                false
+            }
+        }) {
+            return idx;
+        }
+
+        // 2. Look for first uncompleted chapter
+        if let Some(idx) = self.chapters_list.iter().position(|c| !c.is_completed()) {
+            return idx;
+        }
+
+        // 3. Fall back to 0
+        0
+    }
+
     pub fn current_series(&self) -> Option<&SeriesWithStats> {
         self.filtered_indices
             .get(self.selected_series_idx)
@@ -1488,7 +1523,7 @@ impl App {
     }
 
     /// Selects the series at `idx` in filtered view (tap). Focuses the series pane,
-    /// reloads the chapter list for it, and cancels any pending delete confirmation.
+    /// reloads the chapter list for it, resumes where left off, and cancels any pending delete.
     pub fn select_series_index(&mut self, idx: usize) {
         if idx >= self.filtered_indices.len() {
             return;
@@ -1496,8 +1531,13 @@ impl App {
         self.active_pane = ActivePane::SeriesList;
         self.selected_series_idx = idx;
         self.series_state.select(Some(idx));
-        self.selected_chapter_idx = 0;
         let _ = self.reload_chapters();
+        self.selected_chapter_idx = self.find_resume_chapter_index();
+        if self.chapters_list.is_empty() {
+            self.chapters_state.select(None);
+        } else {
+            self.chapters_state.select(Some(self.selected_chapter_idx));
+        }
         self.clear_pending_deletes();
     }
 
@@ -1547,8 +1587,13 @@ impl App {
                     self.selected_series_idx =
                         (self.selected_series_idx + 1) % self.filtered_indices.len();
                     self.series_state.select(Some(self.selected_series_idx));
-                    self.selected_chapter_idx = 0;
                     let _ = self.reload_chapters();
+                    self.selected_chapter_idx = self.find_resume_chapter_index();
+                    if self.chapters_list.is_empty() {
+                        self.chapters_state.select(None);
+                    } else {
+                        self.chapters_state.select(Some(self.selected_chapter_idx));
+                    }
                 }
             }
             ActivePane::ChaptersList => {
@@ -1643,8 +1688,13 @@ impl App {
                         self.selected_series_idx -= 1;
                     }
                     self.series_state.select(Some(self.selected_series_idx));
-                    self.selected_chapter_idx = 0;
                     let _ = self.reload_chapters();
+                    self.selected_chapter_idx = self.find_resume_chapter_index();
+                    if self.chapters_list.is_empty() {
+                        self.chapters_state.select(None);
+                    } else {
+                        self.chapters_state.select(Some(self.selected_chapter_idx));
+                    }
                 }
             }
             ActivePane::ChaptersList => {
@@ -3423,5 +3473,24 @@ mod tests {
                 .join("Manhwa")
                 .join("Boss's Daughter"),
         );
+    }
+
+    #[test]
+    fn test_select_series_resumes_at_first_uncompleted_chapter() {
+        let mut app = test_app();
+        app.select_series_index(0);
+        let ch0_id = app.chapters_list[0].chapter.id;
+        let ch1_id = app.chapters_list[1].chapter.id;
+
+        // Mark ch0 and ch1 completed
+        app.db.toggle_completed(ch0_id).unwrap();
+        app.db.toggle_completed(ch1_id).unwrap();
+
+        // Switch away and back to series 0
+        app.select_series_index(1);
+        app.select_series_index(0);
+
+        // Should automatically select chapter 2 (idx 2), which is where the user left off
+        assert_eq!(app.selected_chapter_idx, 2);
     }
 }
