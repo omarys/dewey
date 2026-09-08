@@ -1019,7 +1019,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  Delete                ",
+                "  Delete / x            ",
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Delete selected chapter (press twice to confirm)"),

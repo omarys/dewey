@@ -2367,21 +2367,17 @@ impl App {
     /// Deletes the selected chapter. Requires a second `Delete` press on the same
     /// chapter to confirm; any navigation clears the pending confirmation.
     pub fn request_delete_chapter(&mut self) {
-        if self.active_pane != ActivePane::ChaptersList {
-            self.set_toast(
-                "Switch to Chapters list (Tab or l) to delete chapters",
-                false,
-            );
-            return;
-        }
-
         let chap = match self.current_chapter() {
             Some(c) => c.clone(),
             None => {
-                self.set_toast("No chapter selected", false);
+                self.set_toast("No chapter selected to delete", false);
                 return;
             }
         };
+
+        if self.active_pane != ActivePane::ChaptersList {
+            self.active_pane = ActivePane::ChaptersList;
+        }
 
         let chapter_id = chap.chapter.id;
         let chapter_number = chap.chapter.chapter_number;
@@ -3163,21 +3159,25 @@ mod tests {
     }
 
     #[test]
-    fn test_request_delete_chapter_requires_chapters_pane() {
+    fn test_request_delete_chapter_from_series_pane_focuses_chapters() {
         let mut app = test_app();
         app.active_pane = ActivePane::SeriesList;
 
         let initial_chap_count = app.chapters_list.len();
+        assert!(initial_chap_count > 0);
+        let first_chap_id = app.current_chapter().unwrap().chapter.id;
+
         app.request_delete_chapter();
 
-        assert_eq!(app.pending_delete_chapter_id, None);
+        assert_eq!(app.active_pane, ActivePane::ChaptersList);
+        assert_eq!(app.pending_delete_chapter_id, Some(first_chap_id));
         assert_eq!(app.chapters_list.len(), initial_chap_count);
         assert!(app
             .toast
             .as_ref()
             .unwrap()
             .0
-            .contains("Switch to Chapters list"));
+            .contains("Press Delete again"));
     }
 
     #[test]
