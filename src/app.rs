@@ -151,6 +151,30 @@ impl FilterMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChapterFilter {
+    #[default]
+    All,
+    Bookmarked,
+}
+
+impl ChapterFilter {
+    pub fn next(self) -> Self {
+        match self {
+            ChapterFilter::All => ChapterFilter::Bookmarked,
+            ChapterFilter::Bookmarked => ChapterFilter::All,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            ChapterFilter::All => "All",
+            ChapterFilter::Bookmarked => "Bookmarked",
+        }
+    }
+}
+
 /// One-shot actions exposed as tappable buttons in the footer action bar
 /// (touchscreen-friendly mirror of the keyboard shortcuts).
 #[allow(dead_code)]
@@ -161,6 +185,8 @@ pub enum AppAction {
     FetchNext,
     Mode,
     MarkRead,
+    ToggleBookmark,
+    FilterBookmarks,
     Scan,
     Reset,
     Delete,
@@ -196,9 +222,11 @@ pub struct App {
     pub selected_series_idx: usize,
     pub series_state: ListState,
 
+    pub all_chapters: Vec<ChapterWithProgress>,
     pub chapters_list: Vec<ChapterWithProgress>,
     pub selected_chapter_idx: usize,
     pub chapters_state: TableState,
+    pub chapter_filter: ChapterFilter,
 
     pub input_mode: InputMode,
     pub search_query: String,
@@ -282,9 +310,11 @@ impl App {
             series_list: Vec::new(),
             selected_series_idx: 0,
             series_state,
+            all_chapters: Vec::new(),
             chapters_list: Vec::new(),
             selected_chapter_idx: 0,
             chapters_state,
+            chapter_filter: ChapterFilter::All,
             input_mode: InputMode::Normal,
             search_query: String::new(),
             filter_mode: FilterMode::All,
@@ -1053,7 +1083,11 @@ impl App {
         let new_cat = self.edit_category_input.trim().to_string();
         let new_url = self.edit_fetch_url_input.trim().to_string();
 
-        let curr_series = self.series_list.iter().find(|s| s.series.id == series_id).cloned();
+        let curr_series = self
+            .series_list
+            .iter()
+            .find(|s| s.series.id == series_id)
+            .cloned();
 
         // 1. Update SQLite DB
         self.db.update_series_status(series_id, new_status)?;
@@ -1093,12 +1127,9 @@ impl App {
                             if let Ok(()) = std::fs::rename(&dir, &new_dir) {
                                 active_dir = Some(new_dir.clone());
                                 let is_hidden = s.series.is_hidden;
-                                let _ = self.db.rename_series_directory(
-                                    series_id,
-                                    &dir,
-                                    &new_dir,
-                                    is_hidden,
-                                );
+                                let _ = self
+                                    .db
+                                    .rename_series_directory(series_id, &dir, &new_dir, is_hidden);
                             }
                         }
                     }
@@ -1136,7 +1167,8 @@ impl App {
                         "name".to_string(),
                         serde_json::Value::String(new_title.clone()),
                     );
-                    if let Some(sub_meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                    if let Some(sub_meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut())
+                    {
                         sub_meta.insert(
                             "name".to_string(),
                             serde_json::Value::String(new_title.clone()),
@@ -1446,12 +1478,15 @@ impl App {
     pub fn clear_search_and_filters(&mut self) {
         let had_filters = !self.search_query.is_empty()
             || self.filter_mode != FilterMode::All
-            || self.type_filter != TypeFilter::All;
+            || self.type_filter != TypeFilter::All
+            || self.chapter_filter != ChapterFilter::All;
         self.search_query.clear();
         self.filter_mode = FilterMode::All;
         self.type_filter = TypeFilter::All;
+        self.chapter_filter = ChapterFilter::All;
         self.input_mode = InputMode::Normal;
         self.apply_filter();
+        self.apply_chapter_filter();
         if had_filters {
             self.set_toast("Filters cleared", false);
         }
@@ -1459,52 +1494,87 @@ impl App {
 
     pub fn reload_chapters(&mut self) -> Result<()> {
         if let Some(current_series) = self.current_series() {
-            self.chapters_list = self.db.get_chapters_for_series(current_series.series.id)?;
-            if self.selected_chapter_idx >= self.chapters_list.len()
-                && !self.chapters_list.is_empty()
-            {
-                self.selected_chapter_idx = self.chapters_list.len() - 1;
-            }
+            self.all_chapters = self.db.get_chapters_for_series(current_series.series.id)?;
         } else {
-            self.chapters_list.clear();
-            self.selected_chapter_idx = 0;
+            self.all_chapters.clear();
+        }
+        self.apply_chapter_filter();
+        Ok(())
+    }
+
+    pub fn apply_chapter_filter(&mut self) {
+        match self.chapter_filter {
+            ChapterFilter::All => {
+                self.chapters_list = self.all_chapters.clone();
+            }
+            ChapterFilter::Bookmarked => {
+                self.chapters_list = self
+                    .all_chapters
+                    .iter()
+                    .filter(|c| c.chapter.is_bookmarked)
+                    .cloned()
+                    .collect();
+            }
         }
 
         if self.chapters_list.is_empty() {
+            self.selected_chapter_idx = 0;
             self.chapters_state.select(None);
         } else {
+            if self.selected_chapter_idx >= self.chapters_list.len() {
+                self.selected_chapter_idx = self.chapters_list.len() - 1;
+            }
             self.chapters_state.select(Some(self.selected_chapter_idx));
+        }
+    }
+
+    pub fn toggle_chapter_filter(&mut self) {
+        self.chapter_filter = self.chapter_filter.next();
+        self.apply_chapter_filter();
+        let msg = match self.chapter_filter {
+            ChapterFilter::All => "Chapter filter: All chapters",
+            ChapterFilter::Bookmarked => "Chapter filter: Bookmarked only [🔖]",
+        };
+        self.set_toast(msg, false);
+    }
+
+    pub fn toggle_bookmark_selected(&mut self) -> Result<()> {
+        if let Some(chap) = self.current_chapter() {
+            let chapter_id = chap.chapter.id;
+            let chapter_num = chap.chapter.chapter_number;
+            let is_bookmarked = self.db.toggle_chapter_bookmark(chapter_id)?;
+
+            if let Some(entry) = self
+                .all_chapters
+                .iter_mut()
+                .find(|c| c.chapter.id == chapter_id)
+            {
+                entry.chapter.is_bookmarked = is_bookmarked;
+            }
+            self.apply_chapter_filter();
+
+            let msg = if is_bookmarked {
+                format!("Chapter {:.1} bookmarked [🔖]", chapter_num)
+            } else {
+                format!("Chapter {:.1} bookmark removed", chapter_num)
+            };
+            self.set_toast(msg, false);
         }
         Ok(())
     }
 
     /// Finds the index of the chapter where the user left off:
-    /// 1. The first in-progress chapter (partially read, not completed)
-    /// 2. Or the first uncompleted chapter
-    /// 3. Defaults to 0 if all completed or empty.
+    /// 1. The earliest uncompleted chapter in the series (in-progress or unread).
+    /// 2. Defaults to 0 (first chapter) if the series is completely unread or all completed.
     pub fn find_resume_chapter_index(&self) -> usize {
         if self.chapters_list.is_empty() {
             return 0;
         }
 
-        // 1. Look for in-progress chapter
-        if let Some(idx) = self.chapters_list.iter().position(|c| {
-            if let Some(p) = &c.progress {
-                !p.is_completed && p.last_page_read > 0
-            } else {
-                false
-            }
-        }) {
-            return idx;
-        }
-
-        // 2. Look for first uncompleted chapter
-        if let Some(idx) = self.chapters_list.iter().position(|c| !c.is_completed()) {
-            return idx;
-        }
-
-        // 3. Fall back to 0
-        0
+        self.chapters_list
+            .iter()
+            .position(|c| !c.is_completed())
+            .unwrap_or(0)
     }
 
     pub fn current_series(&self) -> Option<&SeriesWithStats> {
@@ -1749,7 +1819,20 @@ impl App {
     ) -> Result<()> {
         match self.active_pane {
             ActivePane::SeriesList => {
-                self.active_pane = ActivePane::ChaptersList;
+                if let Some(s) = self.current_series() {
+                    let title = s.series.title.clone();
+                    if self.chapter_filter != ChapterFilter::All {
+                        self.chapter_filter = ChapterFilter::All;
+                        self.apply_chapter_filter();
+                    }
+                    if self.chapters_list.is_empty() {
+                        self.set_toast(format!("No chapters found for '{}'", title), false);
+                        return Ok(());
+                    }
+                    self.selected_chapter_idx = self.find_resume_chapter_index();
+                    self.chapters_state.select(Some(self.selected_chapter_idx));
+                    self.read_or_fetch_selected(tui, event_handler)?;
+                }
             }
             ActivePane::ChaptersList => {
                 self.read_or_fetch_selected(tui, event_handler)?;
@@ -1871,6 +1954,12 @@ impl App {
                 };
                 self.reload_chapters()?;
                 self.reload_series()?;
+                if self.active_pane == ActivePane::SeriesList {
+                    self.selected_chapter_idx = self.find_resume_chapter_index();
+                    if !self.chapters_list.is_empty() {
+                        self.chapters_state.select(Some(self.selected_chapter_idx));
+                    }
+                }
 
                 let mut status_msg = payload.completion_message(chapter_num);
                 if updated > 1 {
@@ -2366,7 +2455,10 @@ impl App {
                         && s_dir != self.config.library_dir.join("Manhwa")
                     {
                         if let Err(err) = std::fs::remove_dir_all(&s_dir) {
-                            self.set_toast(format!("Failed to delete series directory: {}", err), true);
+                            self.set_toast(
+                                format!("Failed to delete series directory: {}", err),
+                                true,
+                            );
                             return;
                         }
 
@@ -3222,12 +3314,7 @@ mod tests {
         assert_eq!(app.active_pane, ActivePane::ChaptersList);
         assert_eq!(app.pending_delete_chapter_id, Some(first_chap_id));
         assert_eq!(app.chapters_list.len(), initial_chap_count);
-        assert!(app
-            .toast
-            .as_ref()
-            .unwrap()
-            .0
-            .contains("Press Delete again"));
+        assert!(app.toast.as_ref().unwrap().0.contains("Press Delete again"));
     }
 
     #[test]
@@ -3371,7 +3458,9 @@ mod tests {
 
         // Insert new series
         let series_id = app.db.insert_or_get_series("Test Series").unwrap();
-        app.db.update_series_category(series_id, Some("Manga")).unwrap();
+        app.db
+            .update_series_category(series_id, Some("Manga"))
+            .unwrap();
         app.db
             .record_chapter_download(series_id, 1.0, chap_file.to_str().unwrap(), Some(1), None)
             .unwrap();
@@ -3492,5 +3581,76 @@ mod tests {
 
         // Should automatically select chapter 2 (idx 2), which is where the user left off
         assert_eq!(app.selected_chapter_idx, 2);
+    }
+
+    #[test]
+    fn test_chapter_bookmark_and_filter() {
+        let mut app = test_app();
+        app.select_series_index(0);
+        let total = app.chapters_list.len();
+        assert!(total >= 2);
+
+        // Initially no chapters are bookmarked
+        assert!(!app.chapters_list[0].chapter.is_bookmarked);
+        assert!(!app.chapters_list[1].chapter.is_bookmarked);
+        assert_eq!(app.chapter_filter, ChapterFilter::All);
+
+        // Toggle bookmark on chapter 0
+        app.selected_chapter_idx = 0;
+        app.toggle_bookmark_selected().unwrap();
+        assert!(app.chapters_list[0].chapter.is_bookmarked);
+
+        // Filter by bookmarks
+        app.toggle_chapter_filter();
+        assert_eq!(app.chapter_filter, ChapterFilter::Bookmarked);
+        assert_eq!(app.chapters_list.len(), 1);
+        assert_eq!(
+            app.chapters_list[0].chapter.id,
+            app.all_chapters[0].chapter.id
+        );
+
+        // Unbookmark from filtered view
+        app.toggle_bookmark_selected().unwrap();
+        assert_eq!(app.chapters_list.len(), 0);
+
+        // Clear filters resets chapter filter to All
+        app.clear_search_and_filters();
+        assert_eq!(app.chapter_filter, ChapterFilter::All);
+        assert_eq!(app.chapters_list.len(), total);
+    }
+
+    #[test]
+    fn test_series_resume_earliest_unread_chapter() {
+        let mut app = test_app();
+        app.active_pane = ActivePane::SeriesList;
+        app.select_series_index(0);
+
+        // Scenario 1: Not started -> defaults to first chapter (idx 0)
+        assert_eq!(app.find_resume_chapter_index(), 0);
+
+        // Scenario 2: Mark Chapter 0 completed -> earliest unread is Chapter 1 (idx 1)
+        let ch0_id = app.chapters_list[0].chapter.id;
+        app.db.toggle_completed(ch0_id).unwrap();
+        app.reload_chapters().unwrap();
+        assert_eq!(app.find_resume_chapter_index(), 1);
+
+        // Scenario 3: Chapter 1 is in progress (page 15, not completed) -> remains Chapter 1 (idx 1)
+        let ch1_id = app.chapters_list[1].chapter.id;
+        app.db.upsert_progress(ch1_id, 15, false).unwrap();
+        app.reload_chapters().unwrap();
+        assert_eq!(app.find_resume_chapter_index(), 1);
+
+        // Scenario 4: Chapter 1 marked completed -> earliest unread is Chapter 2 (idx 2)
+        app.db.toggle_completed(ch1_id).unwrap();
+        app.reload_chapters().unwrap();
+        assert_eq!(app.find_resume_chapter_index(), 2);
+
+        // Scenario 5: All chapters completed -> defaults to first chapter (idx 0)
+        let all_ids: Vec<i64> = app.chapters_list.iter().map(|c| c.chapter.id).collect();
+        for id in all_ids {
+            app.db.upsert_progress(id, 20, true).unwrap();
+        }
+        app.reload_chapters().unwrap();
+        assert_eq!(app.find_resume_chapter_index(), 0);
     }
 }

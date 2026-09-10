@@ -455,6 +455,14 @@ async fn main() -> Result<()> {
                                 app.set_toast(format!("Failed to toggle status: {}", err), true);
                             }
                         }
+                        (KeyCode::Char('b'), KeyModifiers::NONE) => {
+                            if let Err(err) = app.toggle_bookmark_selected() {
+                                app.set_toast(format!("Failed to toggle bookmark: {}", err), true);
+                            }
+                        }
+                        (KeyCode::Char('B'), _) => {
+                            app.toggle_chapter_filter();
+                        }
                         (KeyCode::Char('M'), _) | (KeyCode::Char('v'), KeyModifiers::NONE) => {
                             if let Err(err) = app.toggle_reading_mode_selected() {
                                 app.set_toast(
@@ -492,6 +500,8 @@ async fn main() -> Result<()> {
                             app.clear_pending_deletes();
                             if !app.search_query.is_empty()
                                 || app.filter_mode != app::FilterMode::All
+                                || app.type_filter != app::TypeFilter::All
+                                || app.chapter_filter != app::ChapterFilter::All
                             {
                                 app.clear_search_and_filters();
                             } else if app.active_pane == app::ActivePane::ChaptersList {
@@ -810,6 +820,17 @@ async fn main() -> Result<()> {
                                                 true,
                                             );
                                         }
+                                    }
+                                    AppAction::ToggleBookmark => {
+                                        if let Err(err) = app.toggle_bookmark_selected() {
+                                            app.set_toast(
+                                                format!("Failed to toggle bookmark: {}", err),
+                                                true,
+                                            );
+                                        }
+                                    }
+                                    AppAction::FilterBookmarks => {
+                                        app.toggle_chapter_filter();
                                     }
                                     AppAction::Scan => {
                                         app.set_toast("Scanning library in background...", false);

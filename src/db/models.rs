@@ -30,6 +30,7 @@ pub struct Chapter {
     pub file_path: Option<String>,
     pub page_count: Option<i64>,
     pub fetch_url: Option<String>,
+    pub is_bookmarked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +135,7 @@ mod tests {
                 ),
                 page_count: Some(25),
                 fetch_url: None,
+                is_bookmarked: false,
             },
             progress: None,
         };
@@ -152,6 +154,7 @@ mod tests {
                 ),
                 page_count: Some(52),
                 fetch_url: None,
+                is_bookmarked: false,
             },
             progress: None,
         };
@@ -168,6 +171,7 @@ mod tests {
                 file_path: Some("/library/Chainsaw_Man/Chainsaw Man - Chapter 192.cbz".to_string()),
                 page_count: Some(19),
                 fetch_url: None,
+                is_bookmarked: false,
             },
             progress: None,
         };
@@ -183,6 +187,7 @@ mod tests {
                 ),
                 page_count: Some(30),
                 fetch_url: None,
+                is_bookmarked: false,
             },
             progress: None,
         };

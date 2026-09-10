@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS chapters (
     file_path TEXT,
     page_count INTEGER,
     fetch_url TEXT,
+    is_bookmarked INTEGER NOT NULL DEFAULT 0,
     UNIQUE(series_id, chapter_number)
 );
 

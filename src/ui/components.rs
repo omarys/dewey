@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{ActivePane, App, AppAction, FilterMode, InputMode};
+use crate::app::{ActivePane, App, AppAction, ChapterFilter, FilterMode, InputMode};
 use crate::ui::theme::Theme;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -258,73 +258,93 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
 
     let show_title_col = area.width >= 60;
 
-    let rows: Vec<Row> = app
-        .chapters_list
-        .iter()
-        .enumerate()
-        .map(|(idx, chap)| {
-            let is_selected = idx == app.selected_chapter_idx;
-            let num_str = format!("Ch. {:.1}", chap.chapter.chapter_number);
+    let rows: Vec<Row> = if app.chapters_list.is_empty() {
+        if app.chapter_filter == ChapterFilter::Bookmarked && !app.all_chapters.is_empty() {
+            vec![Row::new(vec![
+                Span::raw(""),
+                Span::styled(
+                    "No bookmarked chapters. Press 'b' to bookmark.",
+                    theme.muted_item(),
+                ),
+            ])]
+        } else {
+            Vec::new()
+        }
+    } else {
+        app.chapters_list
+            .iter()
+            .enumerate()
+            .map(|(idx, chap)| {
+                let is_selected = idx == app.selected_chapter_idx;
+                let num_str = format!("Ch. {:.1}", chap.chapter.chapter_number);
 
-            let read_status = if chap.is_completed() {
-                Span::styled("✓ Completed", theme.success_badge())
-            } else if let Some(prog) = &chap.progress {
-                if prog.last_page_read > 0 {
-                    Span::styled(
-                        format!(
-                            "Page {}/{}",
-                            prog.last_page_read,
-                            chap.chapter.page_count.unwrap_or(0)
-                        ),
-                        Style::default().fg(theme.warning),
-                    )
+                let read_status = if chap.is_completed() {
+                    Span::styled("✓ Completed", theme.success_badge())
+                } else if let Some(prog) = &chap.progress {
+                    if prog.last_page_read > 0 {
+                        Span::styled(
+                            format!(
+                                "Page {}/{}",
+                                prog.last_page_read,
+                                chap.chapter.page_count.unwrap_or(0)
+                            ),
+                            Style::default().fg(theme.warning),
+                        )
+                    } else {
+                        Span::styled("Unread", theme.muted_item())
+                    }
                 } else {
                     Span::styled("Unread", theme.muted_item())
+                };
+
+                let file_status = if chap.is_downloaded() {
+                    Span::styled("✓ Ready", theme.success_badge())
+                } else if app.download_jobs.iter().any(|j| {
+                    app.current_series()
+                        .map(|s| s.series.id == j.series_id)
+                        .unwrap_or(false)
+                        && (j.chapter_number - chap.chapter.chapter_number).abs() < f64::EPSILON
+                }) {
+                    Span::styled(
+                        format!("{} Downloading...", get_spinner(app.tick_count)),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled("⤓ Fetch Needed", theme.warning_badge())
+                };
+
+                let row_style = if is_selected {
+                    theme.selected_item()
+                } else {
+                    theme.normal_item()
+                };
+
+                let indicator = match (is_selected, chap.chapter.is_bookmarked) {
+                    (true, true) => "▶ 🔖",
+                    (true, false) => "▶   ",
+                    (false, true) => "  🔖",
+                    (false, false) => "    ",
+                };
+
+                let mut cells = vec![
+                    Span::raw(indicator),
+                    Span::styled(num_str, Style::default().add_modifier(Modifier::BOLD)),
+                ];
+
+                if show_title_col {
+                    let sub = chap.chapter_subtitle().unwrap_or_default();
+                    cells.push(Span::styled(sub, Style::default().fg(theme.fg)));
                 }
-            } else {
-                Span::styled("Unread", theme.muted_item())
-            };
 
-            let file_status = if chap.is_downloaded() {
-                Span::styled("✓ Ready", theme.success_badge())
-            } else if app.download_jobs.iter().any(|j| {
-                app.current_series()
-                    .map(|s| s.series.id == j.series_id)
-                    .unwrap_or(false)
-                    && (j.chapter_number - chap.chapter.chapter_number).abs() < f64::EPSILON
-            }) {
-                Span::styled(
-                    format!("{} Downloading...", get_spinner(app.tick_count)),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled("⤓ Fetch Needed", theme.warning_badge())
-            };
+                cells.push(read_status);
+                cells.push(file_status);
 
-            let row_style = if is_selected {
-                theme.selected_item()
-            } else {
-                theme.normal_item()
-            };
-
-            let mut cells = vec![
-                Span::raw(if is_selected { "▶" } else { " " }),
-                Span::styled(num_str, Style::default().add_modifier(Modifier::BOLD)),
-            ];
-
-            if show_title_col {
-                let sub = chap.chapter_subtitle().unwrap_or_default();
-                cells.push(Span::styled(sub, Style::default().fg(theme.fg)));
-            }
-
-            cells.push(read_status);
-            cells.push(file_status);
-
-            Row::new(cells).style(row_style)
-        })
-        .collect();
+                Row::new(cells).style(row_style)
+            })
+            .collect()
+    };
 
     let (header, widths): (Row, Vec<Constraint>) = if show_title_col {
         (
@@ -341,7 +361,7 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
                     .add_modifier(Modifier::UNDERLINED),
             ),
             vec![
-                Constraint::Length(2),
+                Constraint::Length(4),
                 Constraint::Length(10),
                 Constraint::Min(16),
                 Constraint::Length(16),
@@ -356,12 +376,23 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
                     .add_modifier(Modifier::UNDERLINED),
             ),
             vec![
-                Constraint::Length(2),
+                Constraint::Length(4),
                 Constraint::Length(12),
                 Constraint::Length(18),
                 Constraint::Min(15),
             ],
         )
+    };
+
+    let filter_badge = match app.chapter_filter {
+        ChapterFilter::All => String::new(),
+        ChapterFilter::Bookmarked => {
+            format!(
+                " [🔖 Bookmarked ({} of {})]",
+                app.chapters_list.len(),
+                app.all_chapters.len()
+            )
+        }
     };
 
     let table = Table::new(rows, widths)
@@ -372,7 +403,7 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
                 .border_type(BorderType::Rounded)
                 .border_style(border_style)
                 .title(Span::styled(
-                    format!(" 2. Chapters — {} ", series_title),
+                    format!(" 2. Chapters — {}{} ", series_title, filter_badge),
                     title_style,
                 )),
         )
@@ -701,7 +732,7 @@ pub fn render_action_bar(
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(area);
 
-        let row1_actions = [
+        let series_row1 = [
             ("📖 Read", "↵", AppAction::Open),
             ("🔍 Find", "/", AppAction::Search),
             ("⚡ Status", "f", AppAction::Filter),
@@ -711,7 +742,7 @@ pub fn render_action_bar(
             ("🔒 Hide", "H", AppAction::ToggleHidden),
         ];
 
-        let row2_actions = [
+        let series_row2 = [
             ("➕ Add", "a", AppAction::AddSeries),
             ("✏ Edit", "e", AppAction::EditSeries),
             ("⬇ Fetch", "d", AppAction::Fetch),
@@ -722,12 +753,30 @@ pub fn render_action_bar(
             ("❌ Quit", "q", AppAction::Quit),
         ];
 
-        for (row_idx, (actions, row_area)) in [
-            (&row1_actions[..], row_chunks[0]),
-            (&row2_actions[..], row_chunks[1]),
-        ]
-        .iter()
-        .enumerate()
+        let chapters_row1 = [
+            ("📖 Read", "↵", AppAction::Open),
+            ("🔖 Mark", "b", AppAction::ToggleBookmark),
+            ("🔖 Filter", "B", AppAction::FilterBookmarks),
+            ("✓ Mark", "m", AppAction::MarkRead),
+        ];
+
+        let chapters_row2 = [
+            ("⬇ Fetch", "d", AppAction::Fetch),
+            ("🗑 Del", "x", AppAction::Delete),
+            ("❓ Help", "?", AppAction::Help),
+            ("❌ Quit", "q", AppAction::Quit),
+        ];
+
+        let (row1_actions, row2_actions) = if app.active_pane == ActivePane::ChaptersList {
+            (&chapters_row1[..], &chapters_row2[..])
+        } else {
+            (&series_row1[..], &series_row2[..])
+        };
+
+        for (row_idx, (actions, row_area)) in
+            [(row1_actions, row_chunks[0]), (row2_actions, row_chunks[1])]
+                .iter()
+                .enumerate()
         {
             let mut spans = Vec::new();
             let mut current_x = row_area.x;
@@ -776,7 +825,7 @@ pub fn render_action_bar(
             f.render_widget(p, *row_area);
         }
     } else {
-        let actions = [
+        let series_actions = [
             ("📖 Read", "↵", AppAction::Open),
             ("➕ Add", "a", AppAction::AddSeries),
             ("✏ Edit", "e", AppAction::EditSeries),
@@ -794,6 +843,24 @@ pub fn render_action_bar(
             ("❌ Quit", "q", AppAction::Quit),
         ];
 
+        let chapters_actions = [
+            ("📖 Read", "↵", AppAction::Open),
+            ("🔖 Bookmark", "b", AppAction::ToggleBookmark),
+            ("🔖 Filter", "B", AppAction::FilterBookmarks),
+            ("✓ Mark Read", "m", AppAction::MarkRead),
+            ("⬇ Fetch", "d", AppAction::Fetch),
+            ("🗑 Delete", "x", AppAction::Delete),
+            ("📁 Scan", "s", AppAction::Scan),
+            ("❓ Help", "?", AppAction::Help),
+            ("❌ Quit", "q", AppAction::Quit),
+        ];
+
+        let actions = if app.active_pane == ActivePane::ChaptersList {
+            &chapters_actions[..]
+        } else {
+            &series_actions[..]
+        };
+
         let mut spans = Vec::new();
         let mut current_x = area.x;
 
@@ -807,10 +874,10 @@ pub fn render_action_bar(
                 width: btn_len,
                 height: 1,
             };
-            app.action_rects.push((rect, action));
+            app.action_rects.push((rect, *action));
             current_x += btn_len;
 
-            let fg = if action == AppAction::Quit {
+            let fg = if *action == AppAction::Quit {
                 theme.error
             } else {
                 theme.accent
@@ -850,6 +917,8 @@ fn action_key_hint(action: AppAction) -> &'static str {
         AppAction::FetchNext => "D",
         AppAction::Mode => "M",
         AppAction::MarkRead => "m",
+        AppAction::ToggleBookmark => "b",
+        AppAction::FilterBookmarks => "B",
         AppAction::Scan => "s",
         AppAction::Reset => "u",
         AppAction::Delete => "Shift+Del",
@@ -866,7 +935,7 @@ fn action_key_hint(action: AppAction) -> &'static str {
 }
 
 pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
-    let area = centered_rect(65, 75, f.area());
+    let area = centered_rect(65, 80, f.area());
     f.render_widget(Clear, area);
 
     let help_text = vec![
@@ -995,6 +1064,20 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 Style::default().fg(theme.warning),
             ),
             Span::raw("Toggle chapter completed / uncompleted"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  b                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Toggle bookmark on selected chapter (🔖)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  B                     ",
+                Style::default().fg(theme.warning),
+            ),
+            Span::raw("Toggle chapter bookmark filter (All ↔ Bookmarked)"),
         ]),
         Line::from(vec![
             Span::styled(

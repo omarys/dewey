@@ -109,7 +109,15 @@ impl Database {
         let _ = conn.execute("ALTER TABLE series ADD COLUMN category TEXT", []);
         let _ = conn.execute("ALTER TABLE chapters ADD COLUMN fetch_url TEXT", []);
         let _ = conn.execute(
+            "ALTER TABLE chapters ADD COLUMN is_bookmarked INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path)",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chapters_bookmarked ON chapters(is_bookmarked)",
             [],
         );
 
@@ -191,7 +199,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT
-                c.id, c.series_id, c.chapter_number, c.file_path, c.page_count, c.fetch_url,
+                c.id, c.series_id, c.chapter_number, c.file_path, c.page_count, c.fetch_url, c.is_bookmarked,
                 p.last_page_read, p.is_completed, p.last_read_at
              FROM chapters c
              LEFT JOIN progress p ON c.id = p.chapter_id
@@ -201,6 +209,7 @@ impl Database {
 
         let chapters = stmt
             .query_map(params![series_id], |row| {
+                let is_bookmarked_int: i64 = row.get(6).unwrap_or(0);
                 let chapter = Chapter {
                     id: row.get(0)?,
                     series_id: row.get(1)?,
@@ -208,12 +217,13 @@ impl Database {
                     file_path: row.get(3)?,
                     page_count: row.get(4)?,
                     fetch_url: row.get(5)?,
+                    is_bookmarked: is_bookmarked_int != 0,
                 };
 
-                let last_page_read: Option<i64> = row.get(6)?;
+                let last_page_read: Option<i64> = row.get(7)?;
                 let progress = if let Some(last_page) = last_page_read {
-                    let is_completed_int: i64 = row.get(7).unwrap_or(0);
-                    let last_read_at_str: Option<String> = row.get(8)?;
+                    let is_completed_int: i64 = row.get(8).unwrap_or(0);
+                    let last_read_at_str: Option<String> = row.get(9)?;
                     let last_read_at = last_read_at_str.and_then(|s| {
                         DateTime::parse_from_rfc3339(&s)
                             .map(|dt| dt.with_timezone(&Utc))
@@ -361,6 +371,31 @@ impl Database {
         )?;
 
         Ok(new_completed)
+    }
+
+    pub fn toggle_chapter_bookmark(&self, chapter_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let current: i64 = conn.query_row(
+            "SELECT is_bookmarked FROM chapters WHERE id = ?1",
+            params![chapter_id],
+            |row| row.get(0),
+        )?;
+        let new_val = if current == 0 { 1 } else { 0 };
+        conn.execute(
+            "UPDATE chapters SET is_bookmarked = ?1 WHERE id = ?2",
+            params![new_val, chapter_id],
+        )?;
+        Ok(new_val != 0)
+    }
+
+    pub fn set_chapter_bookmark(&self, chapter_id: i64, is_bookmarked: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let val = if is_bookmarked { 1 } else { 0 };
+        conn.execute(
+            "UPDATE chapters SET is_bookmarked = ?1 WHERE id = ?2",
+            params![val, chapter_id],
+        )?;
+        Ok(())
     }
 
     pub fn record_chapter_download(
@@ -1391,5 +1426,124 @@ mod tests {
         );
         assert!(updated[0].chapter.file_path.is_some());
         assert_eq!(updated[1].chapter.file_path, None);
+    }
+
+    #[test]
+    fn test_chapter_bookmarking() {
+        let db = Database::in_memory().unwrap();
+        let s_id = db.insert_or_get_series("Bookmark Test Series").unwrap();
+
+        let scan_entries = vec![
+            crate::db::ChapterScanEntry {
+                chapter_number: 1.0,
+                file_path: "/tmp/ch1.cbz".to_string(),
+                page_count: Some(20),
+            },
+            crate::db::ChapterScanEntry {
+                chapter_number: 2.0,
+                file_path: "/tmp/ch2.cbz".to_string(),
+                page_count: Some(25),
+            },
+        ];
+        db.batch_record_chapters(s_id, &scan_entries).unwrap();
+
+        let chapters = db.get_chapters_for_series(s_id).unwrap();
+        assert_eq!(chapters.len(), 2);
+        assert!(!chapters[0].chapter.is_bookmarked);
+        assert!(!chapters[1].chapter.is_bookmarked);
+
+        // Toggle bookmark for chapter 1
+        let bookmarked = db.toggle_chapter_bookmark(chapters[0].chapter.id).unwrap();
+        assert!(bookmarked);
+
+        let chapters = db.get_chapters_for_series(s_id).unwrap();
+        assert!(chapters[0].chapter.is_bookmarked);
+        assert!(!chapters[1].chapter.is_bookmarked);
+
+        // Toggle off
+        let bookmarked = db.toggle_chapter_bookmark(chapters[0].chapter.id).unwrap();
+        assert!(!bookmarked);
+
+        let chapters = db.get_chapters_for_series(s_id).unwrap();
+        assert!(!chapters[0].chapter.is_bookmarked);
+
+        // Explicit set
+        db.set_chapter_bookmark(chapters[1].chapter.id, true)
+            .unwrap();
+        let chapters = db.get_chapters_for_series(s_id).unwrap();
+        assert!(chapters[1].chapter.is_bookmarked);
+
+        // Re-scanning should NOT wipe bookmark
+        db.batch_record_chapters(s_id, &scan_entries).unwrap();
+        let chapters = db.get_chapters_for_series(s_id).unwrap();
+        assert!(chapters[1].chapter.is_bookmarked);
+    }
+
+    #[test]
+    fn test_migration_from_old_schema_without_bookmarks() {
+        let db_path =
+            std::env::temp_dir().join(format!("dewey_old_schema_test_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+
+        // Create an old database with chapters missing is_bookmarked
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE series (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    sort_title TEXT,
+                    cover_path TEXT,
+                    status TEXT,
+                    fetch_url TEXT,
+                    metadata_json TEXT,
+                    reading_mode TEXT DEFAULT 'webtoon',
+                    is_hidden INTEGER NOT NULL DEFAULT 0,
+                    category TEXT
+                );
+                CREATE TABLE chapters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+                    chapter_number REAL NOT NULL,
+                    file_path TEXT,
+                    page_count INTEGER,
+                    fetch_url TEXT,
+                    UNIQUE(series_id, chapter_number)
+                );
+                CREATE TABLE progress (
+                    chapter_id INTEGER PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+                    last_page_read INTEGER NOT NULL DEFAULT 0,
+                    is_completed INTEGER NOT NULL DEFAULT 0,
+                    last_read_at TEXT
+                );
+                CREATE INDEX idx_chapters_series_id ON chapters(series_id);
+                CREATE INDEX idx_chapters_file_path ON chapters(file_path);
+                CREATE INDEX idx_progress_last_read ON progress(last_read_at);
+                "#,
+            )
+            .unwrap();
+
+            conn.execute("INSERT INTO series (title) VALUES ('Test')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO chapters (series_id, chapter_number) VALUES (1, 1.0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Open with Dewey Database::open, which runs init_schema migrations
+        let db = Database::open(&db_path).expect("Opening old database should succeed");
+        let chapters = db.get_chapters_for_series(1).unwrap();
+        assert_eq!(chapters.len(), 1);
+        assert!(!chapters[0].chapter.is_bookmarked);
+
+        // Verify bookmark toggle works on migrated database
+        let bookmarked = db.toggle_chapter_bookmark(chapters[0].chapter.id).unwrap();
+        assert!(bookmarked);
+
+        drop(db);
+        let _ = Database::reset(&db_path);
     }
 }

@@ -584,18 +584,16 @@ impl LibraryScanner {
             .get("title")
             .or_else(|| parsed.get("name"))
             .or_else(|| {
-                parsed.get("metadata").and_then(|m| {
-                    m.get("name").or_else(|| m.get("title"))
-                })
+                parsed
+                    .get("metadata")
+                    .and_then(|m| m.get("name").or_else(|| m.get("title")))
             })
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
         let status = parsed
             .get("status")
-            .or_else(|| {
-                parsed.get("metadata").and_then(|m| m.get("status"))
-            })
+            .or_else(|| parsed.get("metadata").and_then(|m| m.get("status")))
             .and_then(|v| v.as_str())
             .map(|s| match s {
                 "Continuing" => "Ongoing".to_string(),
@@ -1082,7 +1080,8 @@ mod tests {
 
     #[test]
     fn test_series_json_root_title_overrides_nested_metadata() {
-        let root = std::env::temp_dir().join(format!("dewey_root_title_test_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("dewey_root_title_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
         let series_dir = root.join("Solo Leveling");
@@ -1125,7 +1124,8 @@ mod tests {
         let db = Database::in_memory().unwrap();
         // Insert old series that no longer exists on disk
         let old_id = db.insert_or_get_series("Solo Leveling (Volume)").unwrap();
-        db.update_series_fetch_url(old_id, "https://example.com").unwrap();
+        db.update_series_fetch_url(old_id, "https://example.com")
+            .unwrap();
 
         // Run scanner
         let summary = LibraryScanner::scan_directory(&db, &root).unwrap();
