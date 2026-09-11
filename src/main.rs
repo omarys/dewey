@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod db;
+mod debug_history;
 mod event;
 mod runner;
 mod scanner;
@@ -18,6 +19,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use app::{ActivePane, App, AppAction};
 use config::Config;
 use db::Database;
+use debug_history::DebugHistory;
 use event::{AppEvent, EventHandler};
 use runner::ContinuumRunner;
 use terminal::Tui;
@@ -69,6 +71,10 @@ struct Cli {
     /// Override max concurrent worker threads for library scanning
     #[arg(long, value_name = "N")]
     scan_concurrency: Option<usize>,
+
+    /// Show recent reading history for agentic troubleshooting (hidden)
+    #[arg(long = "debug-history", hide = true)]
+    debug_history: bool,
 }
 
 fn init_logging(log_path: &Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -177,13 +183,24 @@ async fn main() -> Result<()> {
         db.seed_sample_data_if_empty()?;
     }
 
+    let debug_history_path = DebugHistory::default_path();
+
+    if cli.debug_history {
+        let history = DebugHistory::load_or_fallback(&debug_history_path, &db);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".to_string())
+        );
+        return Ok(());
+    }
+
     // Direct file launch mode (e.g. `dewey path/to/chapter.cbz`).
     // A directory argument is a library directory, not a file to launch.
     if let Some(target_file) = cli.file.as_ref().filter(|p| !p.is_dir()) {
         let abs_path = std::fs::canonicalize(target_file).unwrap_or(target_file.clone());
         let chapter_id = db.get_or_create_chapter_for_file(&abs_path)?;
 
-        let (series_id, last_page, chapter_num, series_mode) = {
+        let (series_id, last_page, chapter_num, series_mode, series_title) = {
             let conn = db.get_progress_for_file(&abs_path)?;
             let p = conn
                 .as_ref()
@@ -195,8 +212,19 @@ async fn main() -> Result<()> {
             let mode = db
                 .get_series_reading_mode_for_chapter(chapter_id)
                 .unwrap_or_else(|_| "webtoon".to_string());
-            (sid, p, num, mode)
+            let title = db
+                .get_series_title_for_chapter(chapter_id)
+                .unwrap_or_else(|_| "Unknown Series".to_string());
+            (sid, p, num, mode, title)
         };
+
+        DebugHistory::record(
+            &debug_history_path,
+            &series_title,
+            chapter_num,
+            &abs_path,
+            last_page,
+        );
 
         println!(
             "📖 Opening {:?} in Continuum ({} mode, {} profile) at page {}...",
@@ -209,6 +237,14 @@ async fn main() -> Result<()> {
         let runner = ContinuumRunner::new(&config.continuum_bin)
             .with_storage_profile(config.storage_profile.as_str());
         let result = runner.spawn_and_wait(&abs_path, last_page, Some(&series_mode))?;
+
+        DebugHistory::record(
+            &debug_history_path,
+            &series_title,
+            chapter_num,
+            &abs_path,
+            result.last_page,
+        );
 
         if let Some(new_mode) = &result.mode {
             if let Some(sid) = series_id {

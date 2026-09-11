@@ -1879,6 +1879,19 @@ impl App {
             .map(|s| (Some(s.series.id), s.series.reading_mode().to_string()))
             .unwrap_or((None, "webtoon".to_string()));
 
+        let series_title = self
+            .current_series()
+            .map(|s| s.series.title.clone())
+            .unwrap_or_else(|| "Unknown Series".to_string());
+
+        crate::debug_history::DebugHistory::record(
+            &crate::debug_history::DebugHistory::default_path(),
+            &series_title,
+            chapter_num,
+            &file_path,
+            last_page,
+        );
+
         info!(
             chapter_id,
             chapter_num,
@@ -1912,6 +1925,14 @@ impl App {
         // 4. Handle exit payload, update SQLite progress, and display completion message
         match result {
             Ok(payload) => {
+                crate::debug_history::DebugHistory::record(
+                    &crate::debug_history::DebugHistory::default_path(),
+                    &series_title,
+                    chapter_num,
+                    &file_path,
+                    payload.last_page,
+                );
+
                 info!(
                     chapter_id,
                     last_page = payload.last_page,
@@ -3657,15 +3678,10 @@ mod tests {
 
         s.series.title = "Boss's Daughter (Official)".to_string();
         let found2 = app.find_series_directory(&s);
-        assert_eq!(found2, Some(folder2));
+        assert_eq!(found2.as_ref(), Some(&folder2));
 
         let _ = std::fs::remove_dir_all(&folder);
-        let _ = std::fs::remove_dir_all(
-            &app.config
-                .library_dir
-                .join("Manhwa")
-                .join("Boss's Daughter"),
-        );
+        let _ = std::fs::remove_dir_all(&folder2);
     }
 
     #[test]

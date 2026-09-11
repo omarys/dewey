@@ -27,6 +27,15 @@ pub struct ExistingChapterInfo {
 
 pub type ExistingChaptersMap = HashMap<String, ExistingChapterInfo>;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentReadRecord {
+    pub series_title: String,
+    pub chapter_number: f64,
+    pub file_path: String,
+    pub last_page_read: i64,
+    pub last_read_at: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteChapterInfo {
     pub chapter_number: f64,
@@ -970,6 +979,43 @@ impl Database {
             .ok()
             .flatten();
         Ok(mode.unwrap_or_else(|| "webtoon".to_string()))
+    }
+
+    pub fn get_series_title_for_chapter(&self, chapter_id: i64) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let title: Option<String> = conn
+            .query_row(
+                "SELECT s.title FROM series s JOIN chapters c ON s.id = c.series_id WHERE c.id = ?1",
+                params![chapter_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(title.unwrap_or_else(|| "Unknown Series".to_string()))
+    }
+
+    pub fn get_recent_read_history(&self, limit: usize) -> Result<Vec<RecentReadRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.title, c.chapter_number, COALESCE(c.file_path, ''), p.last_page_read, p.last_read_at
+             FROM progress p
+             JOIN chapters c ON p.chapter_id = c.id
+             JOIN series s ON c.series_id = s.id
+             WHERE p.last_read_at IS NOT NULL
+             ORDER BY p.last_read_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(RecentReadRecord {
+                series_title: row.get(0)?,
+                chapter_number: row.get(1)?,
+                file_path: row.get(2)?,
+                last_page_read: row.get(3)?,
+                last_read_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 }
 
