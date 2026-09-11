@@ -2507,7 +2507,9 @@ impl App {
     }
 
     /// Deletes the selected chapter. Requires a second `Delete` press on the same
-    /// chapter to confirm; any navigation clears the pending confirmation.
+    /// Requests deletion of the downloaded file (.cbz / directory) for the selected chapter.
+    /// Requires pressing Delete twice on the same chapter to confirm; any navigation clears
+    /// the pending confirmation. The chapter entry, reading progress, and bookmarks are preserved.
     pub fn request_delete_chapter(&mut self) {
         let chap = match self.current_chapter() {
             Some(c) => c.clone(),
@@ -2557,9 +2559,9 @@ impl App {
                 }
             }
 
-            // 2. Remove record from database (cascades to progress table)
-            if let Err(err) = self.db.delete_chapter(chapter_id) {
-                self.set_toast(format!("Failed to delete chapter: {}", err), true);
+            // 2. Clear file_path in database (preserves chapter record, progress, and bookmarks)
+            if let Err(err) = self.db.clear_chapter_file_path(chapter_id) {
+                self.set_toast(format!("Failed to update chapter: {}", err), true);
                 return;
             }
 
@@ -2575,12 +2577,27 @@ impl App {
             // 4. Reload chapters and series stats
             let _ = self.reload_chapters();
             let _ = self.reload_series();
-            self.set_toast(format!("Chapter {:.1} deleted", chapter_number), false);
+            self.set_toast(
+                format!("Deleted download for Chapter {:.1}", chapter_number),
+                false,
+            );
         } else {
+            if file_path_opt.is_none() {
+                self.clear_pending_deletes();
+                self.set_toast(
+                    format!("Chapter {:.1} is not downloaded", chapter_number),
+                    false,
+                );
+                return;
+            }
+
             self.clear_pending_deletes();
             self.pending_delete_chapter_id = Some(chapter_id);
             self.set_toast(
-                format!("Press Delete again to delete Ch. {:.1}", chapter_number),
+                format!(
+                    "Press Delete again to delete download for Ch. {:.1}",
+                    chapter_number
+                ),
                 false,
             );
         }
@@ -2796,12 +2813,19 @@ mod tests {
     use crate::db::Database;
     use tokio::sync::mpsc;
 
+    static TEST_LIB_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn test_app() -> App {
         let db = Database::in_memory().unwrap();
         db.seed_sample_data_if_empty().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
+        let id = TEST_LIB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let test_lib =
+            std::env::temp_dir().join(format!("dewey_test_lib_{}_{}", std::process::id(), id));
+        let _ = std::fs::remove_dir_all(&test_lib);
         let cfg = Config {
             auto_scan_on_startup: false, // no tokio runtime in tests
+            library_dir: test_lib,
             ..Default::default()
         };
         App::new(cfg, db, tx).unwrap()
@@ -3303,6 +3327,8 @@ mod tests {
     #[test]
     fn test_request_delete_chapter_from_series_pane_focuses_chapters() {
         let mut app = test_app();
+        app.select_series_index(1);
+        app.select_chapter_index(0);
         app.active_pane = ActivePane::SeriesList;
 
         let initial_chap_count = app.chapters_list.len();
@@ -3320,7 +3346,7 @@ mod tests {
     #[test]
     fn test_request_delete_chapter_confirmation_and_navigation_reset() {
         let mut app = test_app();
-        app.select_series_index(0);
+        app.select_series_index(1);
         app.active_pane = ActivePane::ChaptersList;
         app.select_chapter_index(0);
 
@@ -3345,15 +3371,18 @@ mod tests {
         app.request_delete_chapter();
         assert_eq!(app.pending_delete_chapter_id, Some(second_chap_id));
 
-        // Second press confirms and deletes
+        // Second press confirms and deletes download
         app.request_delete_chapter();
         assert_eq!(app.pending_delete_chapter_id, None);
-        assert_eq!(app.chapters_list.len(), initial_count - 1);
-        assert!(app.toast.as_ref().unwrap().0.contains("deleted"));
-        assert!(app
+        assert_eq!(app.chapters_list.len(), initial_count);
+        assert!(app.toast.as_ref().unwrap().0.contains("Deleted download"));
+        let second_chap = app
             .chapters_list
             .iter()
-            .all(|c| c.chapter.id != second_chap_id));
+            .find(|c| c.chapter.id == second_chap_id)
+            .unwrap();
+        assert!(second_chap.chapter.file_path.is_none());
+        assert!(!second_chap.is_downloaded());
     }
 
     #[test]
@@ -3396,14 +3425,89 @@ mod tests {
         // Press Delete again (confirm)
         app.request_delete_chapter();
 
-        // File should be deleted from disk and database
+        // File should be deleted from disk, but chapter entry remains
         assert!(!chap_file.exists());
-        assert!(app
+        let chap = app
             .chapters_list
             .iter()
-            .all(|c| (c.chapter.chapter_number - 999.0).abs() >= f64::EPSILON));
+            .find(|c| (c.chapter.chapter_number - 999.0).abs() < f64::EPSILON)
+            .unwrap();
+        assert!(chap.chapter.file_path.is_none());
+        assert!(!chap.is_downloaded());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_delete_chapter_preserves_progress_and_bookmark() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dewey_del_preserve_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let chap_file = temp_dir.join("c100.cbz");
+        std::fs::write(&chap_file, b"content").unwrap();
+
+        let mut app = test_app();
+        let series_id = app.current_series().unwrap().series.id;
+
+        let chap_id = app
+            .db
+            .record_chapter_download(
+                series_id,
+                555.0,
+                chap_file.to_str().unwrap(),
+                Some(50),
+                None,
+            )
+            .unwrap();
+
+        // Add progress and bookmark
+        app.db.upsert_progress(chap_id, 25, false).unwrap();
+        app.db.set_chapter_bookmark(chap_id, true).unwrap();
+        app.reload_chapters().unwrap();
+
+        let idx = app
+            .chapters_list
+            .iter()
+            .position(|c| c.chapter.id == chap_id)
+            .unwrap();
+        app.active_pane = ActivePane::ChaptersList;
+        app.select_chapter_index(idx);
+
+        // Delete download (confirm)
+        app.request_delete_chapter();
+        app.request_delete_chapter();
+
+        // File is deleted
+        assert!(!chap_file.exists());
+
+        // Chapter entry still exists with progress and bookmark
+        let updated = app
+            .chapters_list
+            .iter()
+            .find(|c| c.chapter.id == chap_id)
+            .unwrap();
+        assert!(updated.chapter.file_path.is_none());
+        assert!(!updated.is_downloaded());
+        assert_eq!(updated.last_page(), 25);
+        assert!(!updated.is_completed());
+        assert!(updated.chapter.is_bookmarked);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_delete_not_downloaded_chapter_shows_toast_and_does_not_delete() {
+        let mut app = test_app();
+        app.select_series_index(0); // Chainsaw Man has no downloaded chapters
+        app.active_pane = ActivePane::ChaptersList;
+        app.select_chapter_index(0);
+
+        let chap = app.current_chapter().unwrap();
+        assert!(chap.chapter.file_path.is_none());
+
+        app.request_delete_chapter();
+        assert_eq!(app.pending_delete_chapter_id, None);
+        assert!(app.toast.as_ref().unwrap().0.contains("not downloaded"));
     }
 
     #[test]

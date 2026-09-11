@@ -1105,7 +1105,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  Delete / x            ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Delete selected chapter (press twice to confirm)"),
+            Span::raw("Delete downloaded chapter file (press twice to confirm)"),
         ]),
         Line::from(vec![
             Span::styled(

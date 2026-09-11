@@ -332,6 +332,17 @@ impl Database {
         Ok(())
     }
 
+    /// Clears the file_path of a chapter (marking it as not downloaded) without removing
+    /// the chapter record, reading progress, or bookmarks.
+    pub fn clear_chapter_file_path(&self, chapter_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chapters SET file_path = NULL WHERE id = ?1",
+            params![chapter_id],
+        )?;
+        Ok(())
+    }
+
     /// Wipes the on-disk SQLite database so the next open starts fresh.
     /// Also removes the WAL and SHM sidecar files SQLite creates alongside it.
     pub fn reset(path: &Path) -> Result<()> {

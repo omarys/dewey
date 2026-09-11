@@ -184,7 +184,9 @@ impl LibraryScanner {
                         }
                     }
 
-                    if !p.exists() || is_invalid_dir || belongs_to_other_series {
+                    if !p.exists() || is_invalid_dir {
+                        let _ = db.clear_chapter_file_path(c.chapter.id);
+                    } else if belongs_to_other_series {
                         let _ = db.delete_chapter(c.chapter.id);
                     }
                 }
@@ -1135,6 +1137,47 @@ mod tests {
         // The old series with 0 chapters and no disk folder should be deleted!
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].series.title, "Solo Leveling");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_cleanup_stale_records_clears_file_path_but_preserves_chapter() {
+        let root = std::env::temp_dir().join(format!("dewey_stale_chap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let series_dir = root.join("Solo Leveling");
+        std::fs::create_dir_all(&series_dir).unwrap();
+        let chap_file = series_dir.join("c001.cbz");
+        std::fs::write(&chap_file, b"fake_cbz").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let _ = LibraryScanner::scan_directory(&db, &root).unwrap();
+
+        let chapters = db.get_chapters_for_series(1).unwrap();
+        assert_eq!(chapters.len(), 1);
+        assert!(chapters[0].is_downloaded());
+        let chap_id = chapters[0].chapter.id;
+
+        // Add progress and bookmark
+        db.upsert_progress(chap_id, 15, false).unwrap();
+        db.set_chapter_bookmark(chap_id, true).unwrap();
+
+        // Simulate file removed from disk
+        std::fs::remove_file(&chap_file).unwrap();
+
+        // Run cleanup
+        let dirs = LibraryScanner::find_series_directories(&root);
+        let _ = LibraryScanner::cleanup_stale_records(&db, &dirs).unwrap();
+
+        // Chapter entry still exists, progress and bookmark intact, file_path is None
+        let after = db.get_chapters_for_series(1).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].chapter.id, chap_id);
+        assert!(!after[0].is_downloaded());
+        assert!(after[0].chapter.file_path.is_none());
+        assert_eq!(after[0].last_page(), 15);
+        assert!(after[0].chapter.is_bookmarked);
 
         let _ = std::fs::remove_dir_all(&root);
     }
