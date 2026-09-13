@@ -59,6 +59,14 @@ pub struct Config {
     /// Optional override for library scanner worker thread concurrency
     #[serde(default)]
     pub max_scan_concurrency: Option<usize>,
+
+    /// Time window in hours before a series chapter list is considered stale (default: 24)
+    #[serde(default = "default_chapter_stale_hours")]
+    pub chapter_stale_hours: u64,
+}
+
+fn default_chapter_stale_hours() -> u64 {
+    24
 }
 
 impl Default for Config {
@@ -78,6 +86,7 @@ impl Default for Config {
             seed_sample_data: false,
             storage_profile: StorageProfile::Fast,
             max_scan_concurrency: None,
+            chapter_stale_hours: 24,
         }
     }
 }

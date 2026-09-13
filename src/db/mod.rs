@@ -116,6 +116,7 @@ impl Database {
             [],
         );
         let _ = conn.execute("ALTER TABLE series ADD COLUMN category TEXT", []);
+        let _ = conn.execute("ALTER TABLE series ADD COLUMN chapters_checked_at TEXT", []);
         let _ = conn.execute("ALTER TABLE chapters ADD COLUMN fetch_url TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE chapters ADD COLUMN is_bookmarked INTEGER NOT NULL DEFAULT 0",
@@ -148,7 +149,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT
-                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json, s.reading_mode, s.is_hidden, s.category,
+                s.id, s.title, s.sort_title, s.cover_path, s.status, s.fetch_url, s.metadata_json, s.reading_mode, s.is_hidden, s.category, s.chapters_checked_at,
                 COUNT(c.id) AS total_count,
                 SUM(CASE WHEN c.file_path IS NOT NULL AND c.file_path != '' THEN 1 ELSE 0 END) AS downloaded_count,
                 SUM(CASE WHEN p.is_completed = 1 THEN 1 ELSE 0 END) AS completed_count,
@@ -164,6 +165,13 @@ impl Database {
         let series_list = stmt
             .query_map([], |row| {
                 let is_hidden_int: i64 = row.get(8).unwrap_or(0);
+                let chapters_checked_at_str: Option<String> = row.get(10)?;
+                let chapters_checked_at = chapters_checked_at_str.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .ok()
+                });
+
                 let series = Series {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -175,13 +183,14 @@ impl Database {
                     reading_mode: row.get(7)?,
                     is_hidden: is_hidden_int != 0,
                     category: row.get(9)?,
+                    chapters_checked_at,
                 };
 
-                let total_count: i64 = row.get(10).unwrap_or(0);
-                let downloaded_count: i64 = row.get(11).unwrap_or(0);
-                let completed_count: i64 = row.get(12).unwrap_or(0);
-                let latest_read_chap: Option<f64> = row.get(13)?;
-                let latest_read_time_str: Option<String> = row.get(14)?;
+                let total_count: i64 = row.get(11).unwrap_or(0);
+                let downloaded_count: i64 = row.get(12).unwrap_or(0);
+                let completed_count: i64 = row.get(13).unwrap_or(0);
+                let latest_read_chap: Option<f64> = row.get(14)?;
+                let latest_read_time_str: Option<String> = row.get(15)?;
 
                 let last_read_at = latest_read_time_str.and_then(|s| {
                     DateTime::parse_from_rfc3339(&s)
@@ -561,6 +570,19 @@ impl Database {
         conn.execute(
             "UPDATE series SET fetch_url = ?1 WHERE id = ?2",
             params![fetch_url, series_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_series_chapters_checked_at(
+        &self,
+        series_id: i64,
+        checked_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE series SET chapters_checked_at = ?1 WHERE id = ?2",
+            params![checked_at.to_rfc3339(), series_id],
         )?;
         Ok(())
     }
@@ -1602,5 +1624,28 @@ mod tests {
 
         drop(db);
         let _ = Database::reset(&db_path);
+    }
+
+    #[test]
+    fn test_series_chapters_checked_at_persistence() {
+        let db = Database::in_memory().unwrap();
+        let series_id = db.insert_or_get_series("Checked Series").unwrap();
+
+        // Initially None
+        let series = db.get_all_series().unwrap();
+        let s = series.iter().find(|s| s.series.id == series_id).unwrap();
+        assert!(s.series.chapters_checked_at.is_none());
+
+        // Update timestamp
+        let now = Utc::now();
+        db.update_series_chapters_checked_at(series_id, now)
+            .unwrap();
+
+        // Retrieve and verify
+        let updated = db.get_all_series().unwrap();
+        let s_updated = updated.iter().find(|s| s.series.id == series_id).unwrap();
+        assert!(s_updated.series.chapters_checked_at.is_some());
+        let diff = (s_updated.series.chapters_checked_at.unwrap() - now).num_seconds();
+        assert!(diff.abs() <= 1);
     }
 }

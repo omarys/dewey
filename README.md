@@ -75,7 +75,7 @@ Dewey acts as the central orchestration "brain" between your local library, read
 | <kbd>Tab</kbd> / <kbd>l</kbd> / <kbd>→</kbd> | **Next Pane** | Switch focus between Series List and Chapters List |
 | <kbd>Shift+Tab</kbd> / <kbd>h</kbd> / <kbd>←</kbd> | **Prev Pane** | Switch focus backwards |
 | <kbd>Enter</kbd> | **Read / Fetch** | Open chapter in Continuum (or fetch via Labrador if missing) |
-| <kbd>d</kbd> | **Download** | Fetch selected chapter in background via Labrador |
+| <kbd>d</kbd> | **Fetch** | Fetch latest unread chapter in background (checks staleness if caught up) |
 | <kbd>D</kbd> | **Download Next** | Fetch the next un-downloaded chapter in current series |
 | <kbd>s</kbd> | **Scan Library** | Re-scan the designated library folder for new files |
 | <kbd>m</kbd> | **Toggle Read** | Toggle chapter completed / uncompleted status |

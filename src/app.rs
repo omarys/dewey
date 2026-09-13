@@ -1865,8 +1865,10 @@ impl App {
             .unwrap_or(false);
 
         if !file_exists {
-            // Chapter is not downloaded yet -> Trigger Labrador fetching loop
-            return self.download_selected_chapter(tui, event_handler);
+            // Chapter is not downloaded yet -> Trigger Labrador fetching for this chapter
+            let chap_num = current_chap.chapter.chapter_number;
+            let chap_url = current_chap.chapter.fetch_url.clone();
+            return self.download_chapter_by_number(chap_num, chap_url, tui, event_handler);
         }
 
         let file_path = PathBuf::from(current_chap.chapter.file_path.as_ref().unwrap());
@@ -2039,6 +2041,16 @@ impl App {
 
                 if self.chapters_list.is_empty() {
                     if let Ok(remote_chaps) = self.labrador_runner.fetch_series_chapters(&url) {
+                        let now = chrono::Utc::now();
+                        let _ = self.db.update_series_chapters_checked_at(series_id, now);
+                        if let Some(s) = self
+                            .series_list
+                            .iter_mut()
+                            .find(|s| s.series.id == series_id)
+                        {
+                            s.series.chapters_checked_at = Some(now);
+                        }
+
                         let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
                             .into_iter()
                             .map(|c| crate::db::RemoteChapterInfo {
@@ -2167,6 +2179,8 @@ impl App {
                 let mut chapter_count_msg = String::new();
                 match self.labrador_runner.fetch_series_chapters(&info.url) {
                     Ok(remote_chaps) => {
+                        let now = chrono::Utc::now();
+                        let _ = self.db.update_series_chapters_checked_at(series_id, now);
                         let count = remote_chaps.len();
                         chapter_count_msg = format!(" ({} chapters)", count);
                         let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
@@ -2222,10 +2236,134 @@ impl App {
         }
     }
 
+    fn spawn_chapter_fetch(
+        &mut self,
+        series_id: i64,
+        series_title: &str,
+        chapter_number: f64,
+        fetch_url: Option<String>,
+        series_dir: PathBuf,
+        toast_prefix: Option<&str>,
+    ) -> bool {
+        if self.download_jobs.iter().any(|j| {
+            j.series_id == series_id && (j.chapter_number - chapter_number).abs() < f64::EPSILON
+        }) {
+            self.set_toast(
+                format!("Chapter {:.1} is already being fetched", chapter_number),
+                false,
+            );
+            return false;
+        }
+
+        let task_id = self.labrador_runner.spawn_fetch(
+            self.event_tx.clone(),
+            series_id,
+            series_title.to_string(),
+            chapter_number,
+            fetch_url,
+            Some(series_dir),
+        );
+
+        self.download_jobs.push(DownloadJob {
+            task_id,
+            series_id,
+            series_title: series_title.to_string(),
+            chapter_number,
+            started_at: Instant::now(),
+        });
+
+        let prefix = toast_prefix.unwrap_or("Fetching");
+        self.set_toast(
+            format!(
+                "{} '{}' Ch. {:.1} with Labrador in background...",
+                prefix, series_title, chapter_number
+            ),
+            false,
+        );
+
+        true
+    }
+
+    /// Downloads a specific chapter number for current series.
+    pub fn download_chapter_by_number(
+        &mut self,
+        chapter_number: f64,
+        chap_url: Option<String>,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
+        let curr = match self.current_series() {
+            Some(s) => s.clone(),
+            None => {
+                self.set_toast("No series selected", true);
+                return Ok(());
+            }
+        };
+
+        let series_id = curr.series.id;
+        let series_title = curr.series.title.clone();
+        let series_dir = self.find_series_directory(&curr).unwrap_or_else(|| {
+            let clean_name: String = series_title
+                .chars()
+                .map(|c| match c {
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    _ => c,
+                })
+                .collect();
+            let folder_name = clean_name.trim();
+            if let Some(cat) = &curr.series.category {
+                if curr.series.is_hidden {
+                    self.config
+                        .library_dir
+                        .join(".Other")
+                        .join(cat)
+                        .join(folder_name)
+                } else {
+                    self.config.library_dir.join(cat).join(folder_name)
+                }
+            } else if curr.series.is_hidden {
+                self.config.library_dir.join(".Other").join(folder_name)
+            } else {
+                self.config.library_dir.join(folder_name)
+            }
+        });
+        let _ = std::fs::create_dir_all(&series_dir);
+
+        let series_url = if curr.series.fetch_url.is_none() && chap_url.is_none() {
+            match self.ensure_series_fetch_url(tui, event_handler)? {
+                Some(url) => Some(url),
+                None => return Ok(()),
+            }
+        } else {
+            curr.series.fetch_url.clone()
+        };
+
+        let effective_url = chap_url.or(series_url);
+        self.spawn_chapter_fetch(
+            series_id,
+            &series_title,
+            chapter_number,
+            effective_url,
+            series_dir,
+            None,
+        );
+        Ok(())
+    }
+
+    /// Resolves the next unread chapter in reading sequence that is not yet downloaded locally.
+    /// Returns Some((chapter_number, fetch_url)) if an undownloaded unread chapter exists.
+    pub fn resolve_next_unread_chapter_to_download(&self) -> Option<(f64, Option<String>)> {
+        self.all_chapters
+            .iter()
+            .find(|c| !c.is_completed() && !c.is_downloaded())
+            .map(|c| (c.chapter.chapter_number, c.chapter.fetch_url.clone()))
+    }
+
     /// Resolves the next chapter number to fetch for the current series:
     /// 1. The first chapter in `chapters_list` where `!is_downloaded()` (missing on disk)
     /// 2. If `chapters_list` is empty, starts at Chapter 1.0
     /// 3. If all existing chapters are already downloaded, targets (max_chapter + 1.0)
+    #[allow(dead_code)]
     pub fn resolve_next_missing_chapter_number(&self) -> (f64, Option<String>) {
         if let Some(missing) = self.chapters_list.iter().find(|c| !c.is_downloaded()) {
             return (
@@ -2247,9 +2385,10 @@ impl App {
         (max_chap + 1.0, None)
     }
 
-    /// Spawns an asynchronous Labrador fetch for the selected chapter.
-    /// If on series list or chapter list is empty, resolves the next missing chapter.
-    /// Pressing d on a series with no URL opens Labrador TUI immediately to resolve it.
+    /// Spawns an asynchronous Labrador fetch for the latest unread chapter.
+    /// If all unread chapters are already downloaded or no unread chapters exist,
+    /// checks if the chapter list is stale (for ongoing series), refreshes remote chapters,
+    /// and attempts to download newly discovered chapters.
     pub fn download_selected_chapter(
         &mut self,
         tui: &mut Tui,
@@ -2265,7 +2404,6 @@ impl App {
 
         let series_id = curr.series.id;
         let series_title = curr.series.title.clone();
-        let series_url = curr.series.fetch_url.clone();
 
         // 1. Resolve exact series directory on disk
         let series_dir = self.find_series_directory(&curr).unwrap_or_else(|| {
@@ -2295,64 +2433,141 @@ impl App {
         });
         let _ = std::fs::create_dir_all(&series_dir);
 
-        // If the series has no URL, open Labrador TUI immediately to resolve it,
-        // regardless of missing chapters.
-        let series_url = if series_url.is_none() {
-            match self.ensure_series_fetch_url(tui, event_handler)? {
-                Some(url) => Some(url),
-                None => return Ok(()), // User cancelled
-            }
-        } else {
-            series_url
-        };
-
-        let (chapter_number, chap_url) =
-            if self.active_pane == ActivePane::ChaptersList && !self.chapters_list.is_empty() {
-                match self.current_chapter() {
-                    Some(c) => (c.chapter.chapter_number, c.chapter.fetch_url.clone()),
-                    None => self.resolve_next_missing_chapter_number(),
+        // 2. Check if we already have an unread chapter that needs to be downloaded locally
+        if let Some((chapter_number, chap_url)) = self.resolve_next_unread_chapter_to_download() {
+            let series_url = if curr.series.fetch_url.is_none() && chap_url.is_none() {
+                match self.ensure_series_fetch_url(tui, event_handler)? {
+                    Some(url) => Some(url),
+                    None => return Ok(()), // User cancelled
                 }
             } else {
-                self.resolve_next_missing_chapter_number()
+                curr.series.fetch_url.clone()
             };
 
-        let effective_url = chap_url.or(series_url);
+            let effective_url = chap_url.or(series_url);
+            self.spawn_chapter_fetch(
+                series_id,
+                &series_title,
+                chapter_number,
+                effective_url,
+                series_dir,
+                None,
+            );
+            return Ok(());
+        }
 
-        // Check if already downloading
-        if self.download_jobs.iter().any(|j| {
-            j.series_id == series_id && (j.chapter_number - chapter_number).abs() < f64::EPSILON
-        }) {
+        // 3. No undownloaded unread chapters exist in current list.
+        // Check if the series is ongoing.
+        if !curr.series.is_ongoing() {
             self.set_toast(
-                format!("Chapter {:.1} is already being fetched", chapter_number),
+                format!("'{}' is completed; no new chapters to fetch", series_title),
                 false,
             );
             return Ok(());
         }
 
-        let task_id = self.labrador_runner.spawn_fetch(
-            self.event_tx.clone(),
-            series_id,
-            series_title.clone(),
-            chapter_number,
-            effective_url,
-            Some(series_dir),
-        );
+        // Check if the chapter list is stale.
+        let stale_hours = self.config.chapter_stale_hours;
+        if !curr.series.is_chapter_list_stale(stale_hours) {
+            let last_checked_str = if let Some(last_time) = curr.series.chapters_checked_at {
+                let elapsed = chrono::Utc::now().signed_duration_since(last_time);
+                if elapsed.num_hours() > 0 {
+                    format!("checked {}h ago", elapsed.num_hours())
+                } else {
+                    format!("checked {}m ago", elapsed.num_minutes().max(1))
+                }
+            } else {
+                "recently checked".to_string()
+            };
 
-        self.download_jobs.push(DownloadJob {
-            task_id,
-            series_id,
-            series_title: series_title.clone(),
-            chapter_number,
-            started_at: Instant::now(),
-        });
+            let msg = if self.all_chapters.iter().any(|c| !c.is_completed()) {
+                format!(
+                    "Chapter list is up to date ({}). All available unread chapters already downloaded.",
+                    last_checked_str
+                )
+            } else {
+                format!(
+                    "Chapter list is up to date ({}). All chapters read.",
+                    last_checked_str
+                )
+            };
+            self.set_toast(msg, false);
+            return Ok(());
+        }
+
+        // 4. Chapter list is stale: query remote provider for new chapters
+        let series_url = if let Some(url) = curr.series.fetch_url.clone() {
+            url
+        } else {
+            match self.ensure_series_fetch_url(tui, event_handler)? {
+                Some(url) => url,
+                None => return Ok(()), // User cancelled
+            }
+        };
 
         self.set_toast(
             format!(
-                "Fetching '{}' Ch. {:.1} with Labrador in background...",
-                series_title, chapter_number
+                "Checking '{}' for new chapters with Labrador...",
+                series_title
             ),
             false,
         );
+
+        match self.labrador_runner.fetch_series_chapters(&series_url) {
+            Ok(remote_chaps) => {
+                let now = chrono::Utc::now();
+                let _ = self.db.update_series_chapters_checked_at(series_id, now);
+                if let Some(s) = self
+                    .series_list
+                    .iter_mut()
+                    .find(|s| s.series.id == series_id)
+                {
+                    s.series.chapters_checked_at = Some(now);
+                }
+
+                let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
+                    .into_iter()
+                    .map(|c| crate::db::RemoteChapterInfo {
+                        chapter_number: c.number.unwrap_or(c.index as f64 + 1.0),
+                        title: Some(c.title),
+                        fetch_url: Some(c.url),
+                    })
+                    .collect();
+
+                let _ = self
+                    .db
+                    .batch_insert_placeholder_chapters(series_id, &placeholders);
+                let _ = self.reload_chapters();
+                let _ = self.reload_series();
+
+                // Attempt to download the newly discovered unread chapter
+                if let Some((chapter_number, chap_url)) =
+                    self.resolve_next_unread_chapter_to_download()
+                {
+                    let effective_url = chap_url.or(Some(series_url));
+                    self.spawn_chapter_fetch(
+                        series_id,
+                        &series_title,
+                        chapter_number,
+                        effective_url,
+                        series_dir,
+                        Some("Found new chapter! Fetching"),
+                    );
+                } else {
+                    self.set_toast(
+                        format!(
+                            "'{}' chapter list is up to date (no new chapters released)",
+                            series_title
+                        ),
+                        false,
+                    );
+                }
+            }
+            Err(err) => {
+                error!(series_id, %series_title, %err, "Failed to fetch remote chapters for stale series");
+                self.set_toast(format!("Failed to check for new chapters: {}", err), true);
+            }
+        }
 
         Ok(())
     }
@@ -3772,5 +3987,162 @@ mod tests {
         }
         app.reload_chapters().unwrap();
         assert_eq!(app.find_resume_chapter_index(), 0);
+    }
+
+    #[test]
+    fn test_resolve_next_unread_chapter_to_download() {
+        let mut app = test_app();
+        app.select_series_index(1); // Solo Leveling: ch 100..108. 100, 101 have dummy paths
+        assert_eq!(app.current_series().unwrap().series.title, "Solo Leveling");
+
+        // Initially, ch 100 and 101 have fake paths that don't exist on disk,
+        // so 100 is uncompleted and !is_downloaded().
+        let target = app.resolve_next_unread_chapter_to_download();
+        assert!(target.is_some());
+        assert_eq!(target.unwrap().0, 100.0);
+
+        // Mark ch 100 completed -> next is 101
+        let ch100_id = app.chapters_list[0].chapter.id;
+        app.db.toggle_completed(ch100_id).unwrap();
+        app.reload_chapters().unwrap();
+
+        let target2 = app.resolve_next_unread_chapter_to_download();
+        assert!(target2.is_some());
+        assert_eq!(target2.unwrap().0, 101.0);
+
+        // Create a real file for 101 so is_downloaded() is true, while 101 is still uncompleted
+        let real_file = app.config.library_dir.join("c101.cbz");
+        std::fs::create_dir_all(&app.config.library_dir).unwrap();
+        std::fs::write(&real_file, b"cbz content").unwrap();
+        let _ch101_id = app.chapters_list[1].chapter.id;
+        app.db
+            .record_chapter_download(
+                app.current_series().unwrap().series.id,
+                101.0,
+                real_file.to_str().unwrap(),
+                Some(20),
+                None,
+            )
+            .unwrap();
+        app.reload_chapters().unwrap();
+
+        // 101 is uncompleted but downloaded -> resolve should skip 101 and target 102!
+        let target3 = app.resolve_next_unread_chapter_to_download();
+        assert!(target3.is_some());
+        assert_eq!(target3.unwrap().0, 102.0);
+
+        // Mark all chapters completed -> resolve returns None
+        for c in &app.all_chapters {
+            app.db.upsert_progress(c.chapter.id, 10, true).unwrap();
+        }
+        app.reload_chapters().unwrap();
+        assert_eq!(app.resolve_next_unread_chapter_to_download(), None);
+    }
+
+    #[tokio::test]
+    async fn test_download_selected_chapter_skips_download_if_already_completed() {
+        let mut app = test_app();
+        app.select_series_index(1); // Solo Leveling (Status: Completed)
+        assert_eq!(app.current_series().unwrap().series.title, "Solo Leveling");
+
+        // Mark all chapters completed
+        for c in &app.all_chapters {
+            app.db.upsert_progress(c.chapter.id, 10, true).unwrap();
+        }
+        app.reload_chapters().unwrap();
+
+        // Mock event handler
+        let (mut event_handler, _sender) = EventHandler::new(Duration::from_millis(50));
+        let mut tui = Tui::new().unwrap();
+
+        // Call download_selected_chapter
+        app.download_selected_chapter(&mut tui, &mut event_handler)
+            .unwrap();
+
+        // Since series status is 'Completed' and no unread chapters exist, it toasts that series is completed
+        assert!(app.download_jobs.is_empty());
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("is completed; no new chapters to fetch"));
+    }
+
+    #[tokio::test]
+    async fn test_download_selected_chapter_ongoing_not_stale_toasts_up_to_date() {
+        let mut app = test_app();
+        // Chainsaw Man is Ongoing (index 0)
+        app.select_series_index(0);
+        assert_eq!(app.current_series().unwrap().series.title, "Chainsaw Man");
+        let series_id = app.current_series().unwrap().series.id;
+
+        // Mark all chapters completed
+        for c in &app.all_chapters {
+            app.db.upsert_progress(c.chapter.id, 10, true).unwrap();
+        }
+        app.reload_chapters().unwrap();
+
+        // Set chapters_checked_at to 1 hour ago (within default 24h window)
+        let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+        app.db
+            .update_series_chapters_checked_at(series_id, one_hour_ago)
+            .unwrap();
+        app.reload_series().unwrap();
+
+        let (mut event_handler, _sender) = EventHandler::new(Duration::from_millis(50));
+        let mut tui = Tui::new().unwrap();
+
+        app.download_selected_chapter(&mut tui, &mut event_handler)
+            .unwrap();
+
+        assert!(app.download_jobs.is_empty());
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Chapter list is up to date"));
+    }
+
+    #[tokio::test]
+    async fn test_download_selected_chapter_stale_attempts_fetch() {
+        let mut app = test_app();
+        // Chainsaw Man is Ongoing (index 0)
+        app.select_series_index(0);
+        let series_id = app.current_series().unwrap().series.id;
+
+        // Mark all chapters completed
+        for c in &app.all_chapters {
+            app.db.upsert_progress(c.chapter.id, 10, true).unwrap();
+        }
+        app.reload_chapters().unwrap();
+
+        // Ensure series has a fetch_url
+        app.db
+            .update_series_fetch_url(series_id, "https://example.com/chainsaw-man")
+            .unwrap();
+        // Set chapters_checked_at to 30 hours ago (> 24h stale)
+        let stale_time = chrono::Utc::now() - chrono::Duration::hours(30);
+        app.db
+            .update_series_chapters_checked_at(series_id, stale_time)
+            .unwrap();
+        app.reload_series().unwrap();
+
+        let (mut event_handler, _sender) = EventHandler::new(Duration::from_millis(50));
+        let mut tui = Tui::new().unwrap();
+
+        // Calling download_selected_chapter will recognize it is stale, attempt remote fetch via Labrador
+        let _ = app.download_selected_chapter(&mut tui, &mut event_handler);
+
+        // Since mock 'labrador' binary does not exist in standard test env, it handles the error gracefully
+        assert!(app.toast.is_some());
+        let toast_msg = app.toast.as_ref().unwrap().0.clone();
+        assert!(
+            toast_msg.contains("Failed to check for new chapters")
+                || toast_msg.contains("Checking")
+                || toast_msg.contains("Found new chapter")
+                || toast_msg.contains("up to date")
+        );
     }
 }

@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS series (
     metadata_json TEXT,
     reading_mode TEXT DEFAULT 'webtoon',
     is_hidden INTEGER NOT NULL DEFAULT 0,
-    category TEXT
+    category TEXT,
+    chapters_checked_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS chapters (

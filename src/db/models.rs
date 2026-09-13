@@ -14,11 +14,41 @@ pub struct Series {
     pub reading_mode: Option<String>,
     pub is_hidden: bool,
     pub category: Option<String>,
+    pub chapters_checked_at: Option<DateTime<Utc>>,
 }
 
 impl Series {
     pub fn reading_mode(&self) -> &str {
         self.reading_mode.as_deref().unwrap_or("webtoon")
+    }
+
+    /// Checks if a series is currently ongoing (i.e. not explicitly completed, finished, ended, or cancelled).
+    pub fn is_ongoing(&self) -> bool {
+        match self.status.as_deref() {
+            Some(st) => {
+                let s = st.trim().to_lowercase();
+                !(s == "completed" || s == "finished" || s == "ended" || s == "cancelled")
+            }
+            None => true,
+        }
+    }
+
+    /// Determines if the series chapter list is stale:
+    /// - Non-ongoing series are never considered stale.
+    /// - Ongoing series with no check timestamp are considered stale.
+    /// - Ongoing series checked longer ago than `stale_hours` are considered stale.
+    pub fn is_chapter_list_stale(&self, stale_hours: u64) -> bool {
+        if !self.is_ongoing() {
+            return false;
+        }
+
+        match self.chapters_checked_at {
+            Some(checked_at) => {
+                let elapsed = Utc::now().signed_duration_since(checked_at);
+                elapsed.num_hours() >= stale_hours as i64
+            }
+            None => true,
+        }
     }
 }
 
@@ -195,5 +225,78 @@ mod tests {
             ch_multiple_sep.chapter_subtitle(),
             Some("Part 1 - The Beginning".to_string())
         );
+    }
+
+    #[test]
+    fn test_series_is_ongoing() {
+        let mut s = Series {
+            id: 1,
+            title: "Test".to_string(),
+            sort_title: None,
+            cover_path: None,
+            status: Some("Ongoing".to_string()),
+            fetch_url: None,
+            metadata_json: None,
+            reading_mode: None,
+            is_hidden: false,
+            category: None,
+            chapters_checked_at: None,
+        };
+        assert!(s.is_ongoing());
+
+        s.status = Some("continuing".to_string());
+        assert!(s.is_ongoing());
+
+        s.status = None;
+        assert!(s.is_ongoing());
+
+        s.status = Some("Completed".to_string());
+        assert!(!s.is_ongoing());
+
+        s.status = Some("Finished".to_string());
+        assert!(!s.is_ongoing());
+
+        s.status = Some("Cancelled".to_string());
+        assert!(!s.is_ongoing());
+
+        s.status = Some("ended".to_string());
+        assert!(!s.is_ongoing());
+    }
+
+    #[test]
+    fn test_series_is_chapter_list_stale() {
+        let mut s = Series {
+            id: 1,
+            title: "Test".to_string(),
+            sort_title: None,
+            cover_path: None,
+            status: Some("Ongoing".to_string()),
+            fetch_url: None,
+            metadata_json: None,
+            reading_mode: None,
+            is_hidden: false,
+            category: None,
+            chapters_checked_at: None,
+        };
+
+        // 1. Ongoing series with no prior check is stale
+        assert!(s.is_chapter_list_stale(24));
+
+        // 2. Checked 2 hours ago is not stale with 24h threshold
+        let now = Utc::now();
+        s.chapters_checked_at = Some(now - chrono::Duration::hours(2));
+        assert!(!s.is_chapter_list_stale(24));
+
+        // 3. Checked 25 hours ago is stale with 24h threshold
+        s.chapters_checked_at = Some(now - chrono::Duration::hours(25));
+        assert!(s.is_chapter_list_stale(24));
+
+        // 4. Completed series is never stale regardless of time
+        s.status = Some("Completed".to_string());
+        s.chapters_checked_at = None;
+        assert!(!s.is_chapter_list_stale(24));
+
+        s.chapters_checked_at = Some(now - chrono::Duration::hours(100));
+        assert!(!s.is_chapter_list_stale(24));
     }
 }

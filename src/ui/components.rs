@@ -1042,7 +1042,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  d                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Fetch selected chapter (or next unread) via Labrador"),
+            Span::raw("Fetch latest unread chapter via Labrador"),
         ]),
         Line::from(vec![
             Span::styled(
