@@ -4213,4 +4213,3 @@ mod tests {
         assert_eq!(app.download_jobs[0].chapter_number, 100.0);
     }
 }
-
