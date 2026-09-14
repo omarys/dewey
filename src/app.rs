@@ -2433,7 +2433,35 @@ impl App {
         });
         let _ = std::fs::create_dir_all(&series_dir);
 
-        // 2. Check if we already have an unread chapter that needs to be downloaded locally
+        // 2. If in chapter list pane, prioritize the selected chapter!
+        if self.active_pane == ActivePane::ChaptersList && !self.chapters_list.is_empty() {
+            if let Some(c) = self.current_chapter() {
+                let chapter_number = c.chapter.chapter_number;
+                let chap_url = c.chapter.fetch_url.clone();
+
+                let series_url = if curr.series.fetch_url.is_none() && chap_url.is_none() {
+                    match self.ensure_series_fetch_url(tui, event_handler)? {
+                        Some(url) => Some(url),
+                        None => return Ok(()), // User cancelled
+                    }
+                } else {
+                    curr.series.fetch_url.clone()
+                };
+
+                let effective_url = chap_url.or(series_url);
+                self.spawn_chapter_fetch(
+                    series_id,
+                    &series_title,
+                    chapter_number,
+                    effective_url,
+                    series_dir,
+                    None,
+                );
+                return Ok(());
+            }
+        }
+
+        // 3. Check if we already have an unread chapter that needs to be downloaded locally
         if let Some((chapter_number, chap_url)) = self.resolve_next_unread_chapter_to_download() {
             let series_url = if curr.series.fetch_url.is_none() && chap_url.is_none() {
                 match self.ensure_series_fetch_url(tui, event_handler)? {
@@ -4145,4 +4173,44 @@ mod tests {
                 || toast_msg.contains("up to date")
         );
     }
+
+    #[tokio::test]
+    async fn test_download_selected_chapter_prioritizes_selection_in_chapters_pane() {
+        let mut app = test_app();
+        app.select_series_index(1); // Solo Leveling
+        assert_eq!(app.current_series().unwrap().series.title, "Solo Leveling");
+        let series_id = app.current_series().unwrap().series.id;
+        app.db
+            .update_series_fetch_url(series_id, "https://example.com/solo-leveling")
+            .unwrap();
+        app.reload_series().unwrap();
+
+        // Say chapter 0 (ch 100) is unread.
+        // But user selects index 5 (e.g. ch 105) in ChaptersList pane.
+        app.select_chapter_index(5);
+        assert_eq!(app.active_pane, ActivePane::ChaptersList);
+        let selected_chap_number = app.current_chapter().unwrap().chapter.chapter_number;
+        assert_eq!(selected_chap_number, 105.0);
+
+        let (mut event_handler, _sender) = EventHandler::new(Duration::from_millis(50));
+        let mut tui = Tui::new().unwrap();
+
+        app.download_selected_chapter(&mut tui, &mut event_handler)
+            .unwrap();
+
+        // Verify that a download job was spawned for chapter 105, NOT chapter 100!
+        assert_eq!(app.download_jobs.len(), 1);
+        assert_eq!(app.download_jobs[0].chapter_number, 105.0);
+
+        // Now test when active_pane is SeriesList:
+        app.active_pane = ActivePane::SeriesList;
+        app.download_jobs.clear();
+        app.download_selected_chapter(&mut tui, &mut event_handler)
+            .unwrap();
+
+        // In SeriesList pane, it should fetch next unread chapter (100.0), NOT 105.0!
+        assert_eq!(app.download_jobs.len(), 1);
+        assert_eq!(app.download_jobs[0].chapter_number, 100.0);
+    }
 }
+
