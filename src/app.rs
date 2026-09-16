@@ -1953,15 +1953,20 @@ impl App {
                 // Persist progress for every chapter the reader actually
                 // touched; fall back to the legacy single-chapter contract
                 // when chapters is absent.
+                let mut completed_downloads: Vec<(i64, Option<String>)> = Vec::new();
                 let updated = match payload.chapters.as_ref().filter(|c| !c.is_empty()) {
                     Some(chapters) => {
                         let mut n = 0usize;
                         for entry in chapters {
-                            self.db.apply_chapter_progress(
+                            let cid = self.db.apply_chapter_progress(
                                 Path::new(&entry.file),
                                 entry.last_page,
                                 entry.completed,
                             )?;
+                            if entry.completed {
+                                completed_downloads
+                                    .push((cid, Some(entry.file.to_string_lossy().to_string())));
+                            }
                             n += 1;
                         }
                         n
@@ -1972,9 +1977,14 @@ impl App {
                             payload.last_page,
                             payload.completed,
                         )?;
+                        if payload.completed {
+                            completed_downloads
+                                .push((chapter_id, Some(file_path.to_string_lossy().to_string())));
+                        }
                         1
                     }
                 };
+                self.delete_read_downloads(&completed_downloads);
                 self.reload_chapters()?;
                 self.reload_series()?;
                 if self.active_pane == ActivePane::SeriesList {
@@ -2770,6 +2780,60 @@ impl App {
         }
     }
 
+    /// Removes the on-disk download backing a chapter and reports whether a file
+    /// or directory was actually removed. Never removes the series directory itself.
+    fn delete_chapter_download(&self, file_path: Option<&str>) -> Result<bool> {
+        let Some(fp) = file_path else {
+            return Ok(false);
+        };
+        let p = Path::new(fp);
+        if !p.exists() {
+            return Ok(false);
+        }
+
+        // Safety check: never remove the series directory itself
+        if let Some(curr_s) = self.current_series() {
+            if let Some(s_dir) = self.find_series_directory(curr_s) {
+                if p == s_dir {
+                    anyhow::bail!("Cannot delete series directory as chapter");
+                }
+            }
+        }
+
+        if p.is_dir() {
+            std::fs::remove_dir_all(p)?;
+        } else {
+            std::fs::remove_file(p)?;
+        }
+        Ok(true)
+    }
+
+    /// Removes the downloaded archive for each completed chapter when
+    /// `delete_after_read` is enabled, keeping chapter records, progress, and
+    /// bookmarks. Returns how many downloads were removed.
+    fn delete_read_downloads(&mut self, entries: &[(i64, Option<String>)]) -> usize {
+        if !self.config.delete_after_read {
+            return 0;
+        }
+        let mut removed = 0;
+        for (chapter_id, file_path) in entries {
+            match self.delete_chapter_download(file_path.as_deref()) {
+                Ok(false) => {}
+                Ok(true) => {
+                    if let Err(err) = self.db.clear_chapter_file_path(*chapter_id) {
+                        error!(chapter_id = *chapter_id, %err, "Failed to clear chapter file_path");
+                        continue;
+                    }
+                    removed += 1;
+                }
+                Err(err) => {
+                    error!(chapter_id = *chapter_id, %err, "Failed to delete read chapter download");
+                }
+            }
+        }
+        removed
+    }
+
     /// Deletes the selected chapter. Requires a second `Delete` press on the same
     /// Requests deletion of the downloaded file (.cbz / directory) for the selected chapter.
     /// Requires pressing Delete twice on the same chapter to confirm; any navigation clears
@@ -2797,30 +2861,9 @@ impl App {
             self.clear_pending_deletes();
 
             // 1. Remove physical file/directory if it exists on disk
-            if let Some(ref fp) = file_path_opt {
-                let p = Path::new(fp);
-                if p.exists() {
-                    // Safety check: ensure we do not delete the series directory itself
-                    if let Some(curr_s) = self.current_series() {
-                        if let Some(s_dir) = self.find_series_directory(curr_s) {
-                            if p == s_dir {
-                                self.set_toast("Cannot delete series directory as chapter", true);
-                                return;
-                            }
-                        }
-                    }
-
-                    let rm_res = if p.is_dir() {
-                        std::fs::remove_dir_all(p)
-                    } else {
-                        std::fs::remove_file(p)
-                    };
-
-                    if let Err(err) = rm_res {
-                        self.set_toast(format!("Failed to delete chapter file: {}", err), true);
-                        return;
-                    }
-                }
+            if let Err(err) = self.delete_chapter_download(file_path_opt.as_deref()) {
+                self.set_toast(format!("Failed to delete chapter file: {}", err), true);
+                return;
             }
 
             // 2. Clear file_path in database (preserves chapter record, progress, and bookmarks)
@@ -2841,6 +2884,15 @@ impl App {
             // 4. Reload chapters and series stats
             let _ = self.reload_chapters();
             let _ = self.reload_series();
+
+            // 5. Move selection to the next chapter, mirroring mark-completed
+            if !self.chapters_list.is_empty()
+                && self.selected_chapter_idx + 1 < self.chapters_list.len()
+            {
+                self.selected_chapter_idx += 1;
+                self.chapters_state.select(Some(self.selected_chapter_idx));
+            }
+
             self.set_toast(
                 format!("Deleted download for Chapter {:.1}", chapter_number),
                 false,
@@ -2901,6 +2953,19 @@ impl App {
                 self.db.mark_series_completed(series_id)?;
                 self.reload_chapters()?;
                 self.reload_series()?;
+
+                // Use the unfiltered list: mark_series_completed affects every
+                // chapter, not only those visible under the active filter.
+                let entries: Vec<(i64, Option<String>)> = self
+                    .all_chapters
+                    .iter()
+                    .map(|c| (c.chapter.id, c.chapter.file_path.clone()))
+                    .collect();
+                if self.delete_read_downloads(&entries) > 0 {
+                    let _ = self.reload_chapters();
+                    let _ = self.reload_series();
+                }
+
                 self.set_toast(format!("Series '{}' marked completed [✓]", title), false);
 
                 // Automatically move down to the next series in the list
@@ -2919,9 +2984,15 @@ impl App {
         if let Some(chap) = self.current_chapter() {
             let chapter_id = chap.chapter.id;
             let chapter_num = chap.chapter.chapter_number;
+            let chapter_file = chap.chapter.file_path.clone();
             let is_now_completed = self.db.toggle_completed(chapter_id)?;
             self.reload_chapters()?;
             self.reload_series()?;
+
+            if is_now_completed {
+                self.delete_read_downloads(&[(chapter_id, chapter_file)]);
+                self.reload_chapters()?;
+            }
 
             let msg = if is_now_completed {
                 format!("Chapter {:.1} marked completed [✓]", chapter_num)
@@ -3698,6 +3769,110 @@ mod tests {
             .unwrap();
         assert!(chap.chapter.file_path.is_none());
         assert!(!chap.is_downloaded());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_manual_delete_advances_cursor_to_next_chapter() {
+        let mut app = test_app();
+        app.select_series_index(1);
+        app.active_pane = ActivePane::ChaptersList;
+        app.select_chapter_index(0);
+
+        assert!(app.chapters_list.len() > 1);
+        let deleted_id = app.current_chapter().unwrap().chapter.id;
+        let next_id = app.chapters_list[1].chapter.id;
+
+        app.request_delete_chapter();
+        app.request_delete_chapter();
+
+        assert_eq!(app.selected_chapter_idx, 1);
+        assert_eq!(app.current_chapter().unwrap().chapter.id, next_id);
+        assert_ne!(next_id, deleted_id);
+    }
+
+    fn read_after_cleanup_app(delete_after_read: bool, num: f64, file: &Path) -> App {
+        std::fs::write(file, b"content").unwrap();
+        let mut app = test_app();
+        app.config.delete_after_read = delete_after_read;
+        let series_id = app.current_series().unwrap().series.id;
+        app.db
+            .record_chapter_download(series_id, num, file.to_str().unwrap(), Some(20), None)
+            .unwrap();
+        app.reload_chapters().unwrap();
+        app
+    }
+
+    #[test]
+    fn test_delete_after_read_removes_download_on_completion() {
+        let temp_dir = std::env::temp_dir().join(format!("dewey_dar_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let chap_file = temp_dir.join("c777.cbz");
+
+        let mut app = read_after_cleanup_app(true, 777.0, &chap_file);
+        let chap_id = app
+            .chapters_list
+            .iter()
+            .find(|c| (c.chapter.chapter_number - 777.0).abs() < f64::EPSILON)
+            .unwrap()
+            .chapter
+            .id;
+        let idx = app
+            .chapters_list
+            .iter()
+            .position(|c| c.chapter.id == chap_id)
+            .unwrap();
+        app.active_pane = ActivePane::ChaptersList;
+        app.select_chapter_index(idx);
+
+        app.toggle_completed_selected().unwrap();
+
+        assert!(!chap_file.exists());
+        let chap = app
+            .chapters_list
+            .iter()
+            .find(|c| c.chapter.id == chap_id)
+            .unwrap();
+        assert!(chap.chapter.file_path.is_none());
+        assert!(chap.is_completed());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_delete_after_read_disabled_keeps_download() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dewey_dar_off_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let chap_file = temp_dir.join("c778.cbz");
+
+        let mut app = read_after_cleanup_app(false, 778.0, &chap_file);
+        let chap_id = app
+            .chapters_list
+            .iter()
+            .find(|c| (c.chapter.chapter_number - 778.0).abs() < f64::EPSILON)
+            .unwrap()
+            .chapter
+            .id;
+        let idx = app
+            .chapters_list
+            .iter()
+            .position(|c| c.chapter.id == chap_id)
+            .unwrap();
+        app.active_pane = ActivePane::ChaptersList;
+        app.select_chapter_index(idx);
+
+        app.toggle_completed_selected().unwrap();
+
+        assert!(chap_file.exists());
+        let chap = app
+            .chapters_list
+            .iter()
+            .find(|c| c.chapter.id == chap_id)
+            .unwrap();
+        assert!(chap.chapter.file_path.is_some());
+        assert!(chap.is_completed());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

@@ -63,6 +63,11 @@ pub struct Config {
     /// Time window in hours before a series chapter list is considered stale (default: 24)
     #[serde(default = "default_chapter_stale_hours")]
     pub chapter_stale_hours: u64,
+
+    /// Delete a chapter's downloaded archive once it is marked completed, keeping
+    /// the chapter record, reading progress, and bookmarks
+    #[serde(default)]
+    pub delete_after_read: bool,
 }
 
 fn default_chapter_stale_hours() -> u64 {
@@ -87,6 +92,7 @@ impl Default for Config {
             storage_profile: StorageProfile::Fast,
             max_scan_concurrency: None,
             chapter_stale_hours: 24,
+            delete_after_read: false,
         }
     }
 }
@@ -220,6 +226,7 @@ mod tests {
         assert!(cfg.db_path.is_absolute());
         assert!(cfg.log_file.is_absolute());
         assert_eq!(cfg.storage_profile, StorageProfile::Fast);
+        assert!(!cfg.delete_after_read);
     }
 
     #[test]

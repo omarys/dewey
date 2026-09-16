@@ -131,6 +131,11 @@ auto_scan_on_startup = true
 
 # Seed sample data if database is empty
 seed_sample_data = false
+
+# Delete a chapter's downloaded archive once it is marked completed (reader
+# exit, manual mark-completed, or mark-series-completed). The chapter record,
+# progress, and bookmarks are kept.
+delete_after_read = false
 ```
 
 ### SQLite Memory Tradeoff
