@@ -865,7 +865,7 @@ async fn main() -> Result<()> {
                                             );
                                         }
                                     }
-                                    AppAction::FilterBookmarks => {
+                                    AppAction::FilterChapters => {
                                         app.toggle_chapter_filter();
                                     }
                                     AppAction::Scan => {

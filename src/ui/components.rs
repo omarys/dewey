@@ -259,11 +259,14 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
     let show_title_col = area.width >= 60;
 
     let rows: Vec<Row> = if app.chapters_list.is_empty() {
-        if app.chapter_filter == ChapterFilter::Bookmarked && !app.all_chapters.is_empty() {
+        if app.chapter_filter != ChapterFilter::All && !app.all_chapters.is_empty() {
             vec![Row::new(vec![
                 Span::raw(""),
                 Span::styled(
-                    "No bookmarked chapters. Press 'b' to bookmark.",
+                    format!(
+                        "No {} chapters. Press 'B' to cycle filters.",
+                        app.chapter_filter.label().to_lowercase()
+                    ),
                     theme.muted_item(),
                 ),
             ])]
@@ -384,15 +387,16 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
         )
     };
 
-    let filter_badge = match app.chapter_filter {
-        ChapterFilter::All => String::new(),
-        ChapterFilter::Bookmarked => {
-            format!(
-                " [🔖 Bookmarked ({} of {})]",
-                app.chapters_list.len(),
-                app.all_chapters.len()
-            )
-        }
+    let filter_badge = if app.chapter_filter == ChapterFilter::All {
+        String::new()
+    } else {
+        format!(
+            " [{} {} ({} of {})]",
+            app.chapter_filter.badge(),
+            app.chapter_filter.label(),
+            app.chapters_list.len(),
+            app.all_chapters.len()
+        )
     };
 
     let table = Table::new(rows, widths)
@@ -756,7 +760,7 @@ pub fn render_action_bar(
         let chapters_row1 = [
             ("📖 Read", "↵", AppAction::Open),
             ("🔖 Mark", "b", AppAction::ToggleBookmark),
-            ("🔖 Filter", "B", AppAction::FilterBookmarks),
+            ("🔎 Filter", "B", AppAction::FilterChapters),
             ("✓ Mark", "m", AppAction::MarkRead),
         ];
 
@@ -846,7 +850,7 @@ pub fn render_action_bar(
         let chapters_actions = [
             ("📖 Read", "↵", AppAction::Open),
             ("🔖 Bookmark", "b", AppAction::ToggleBookmark),
-            ("🔖 Filter", "B", AppAction::FilterBookmarks),
+            ("🔎 Filter", "B", AppAction::FilterChapters),
             ("✓ Mark Read", "m", AppAction::MarkRead),
             ("⬇ Fetch", "d", AppAction::Fetch),
             ("🗑 Delete", "x", AppAction::Delete),
@@ -918,7 +922,7 @@ fn action_key_hint(action: AppAction) -> &'static str {
         AppAction::Mode => "M",
         AppAction::MarkRead => "m",
         AppAction::ToggleBookmark => "b",
-        AppAction::FilterBookmarks => "B",
+        AppAction::FilterChapters => "B",
         AppAction::Scan => "s",
         AppAction::Reset => "u",
         AppAction::Delete => "Shift+Del",

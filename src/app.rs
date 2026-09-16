@@ -156,21 +156,36 @@ pub enum ChapterFilter {
     #[default]
     All,
     Bookmarked,
+    Unread,
+    Downloaded,
 }
 
 impl ChapterFilter {
     pub fn next(self) -> Self {
         match self {
             ChapterFilter::All => ChapterFilter::Bookmarked,
-            ChapterFilter::Bookmarked => ChapterFilter::All,
+            ChapterFilter::Bookmarked => ChapterFilter::Unread,
+            ChapterFilter::Unread => ChapterFilter::Downloaded,
+            ChapterFilter::Downloaded => ChapterFilter::All,
         }
     }
 
-    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             ChapterFilter::All => "All",
             ChapterFilter::Bookmarked => "Bookmarked",
+            ChapterFilter::Unread => "Unread",
+            ChapterFilter::Downloaded => "Downloaded",
+        }
+    }
+
+    /// Short glyph shown alongside the label in the chapters pane title.
+    pub fn badge(self) -> &'static str {
+        match self {
+            ChapterFilter::All => "",
+            ChapterFilter::Bookmarked => "\u{1f516}",
+            ChapterFilter::Unread => "\u{25cb}",
+            ChapterFilter::Downloaded => "\u{2b07}",
         }
     }
 }
@@ -186,7 +201,7 @@ pub enum AppAction {
     Mode,
     MarkRead,
     ToggleBookmark,
-    FilterBookmarks,
+    FilterChapters,
     Scan,
     Reset,
     Delete,
@@ -1503,19 +1518,18 @@ impl App {
     }
 
     pub fn apply_chapter_filter(&mut self) {
-        match self.chapter_filter {
-            ChapterFilter::All => {
-                self.chapters_list = self.all_chapters.clone();
-            }
-            ChapterFilter::Bookmarked => {
-                self.chapters_list = self
-                    .all_chapters
-                    .iter()
-                    .filter(|c| c.chapter.is_bookmarked)
-                    .cloned()
-                    .collect();
-            }
-        }
+        let predicate: fn(&ChapterWithProgress) -> bool = match self.chapter_filter {
+            ChapterFilter::All => |_| true,
+            ChapterFilter::Bookmarked => |c| c.chapter.is_bookmarked,
+            ChapterFilter::Unread => |c| !c.is_completed(),
+            ChapterFilter::Downloaded => |c| c.is_downloaded(),
+        };
+        self.chapters_list = self
+            .all_chapters
+            .iter()
+            .filter(|c| predicate(c))
+            .cloned()
+            .collect();
 
         if self.chapters_list.is_empty() {
             self.selected_chapter_idx = 0;
@@ -1532,8 +1546,10 @@ impl App {
         self.chapter_filter = self.chapter_filter.next();
         self.apply_chapter_filter();
         let msg = match self.chapter_filter {
-            ChapterFilter::All => "Chapter filter: All chapters",
-            ChapterFilter::Bookmarked => "Chapter filter: Bookmarked only [🔖]",
+            ChapterFilter::All => "Chapter filter: All chapters".to_string(),
+            ChapterFilter::Bookmarked => "Chapter filter: Bookmarked only [\u{1f516}]".to_string(),
+            ChapterFilter::Unread => "Chapter filter: Unread only [\u{25cb}]".to_string(),
+            ChapterFilter::Downloaded => "Chapter filter: Downloaded only [\u{2b07}]".to_string(),
         };
         self.set_toast(msg, false);
     }
@@ -4155,6 +4171,60 @@ mod tests {
         app.clear_search_and_filters();
         assert_eq!(app.chapter_filter, ChapterFilter::All);
         assert_eq!(app.chapters_list.len(), total);
+    }
+
+    #[test]
+    fn test_chapter_filter_cycles_unread_and_downloaded() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dewey_filter_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let dl_file = temp_dir.join("c001.cbz");
+        let done_file = temp_dir.join("c002.cbz");
+        std::fs::write(&dl_file, b"content").unwrap();
+        std::fs::write(&done_file, b"content").unwrap();
+
+        let mut app = test_app();
+        app.select_series_index(0);
+        let series_id = app.current_series().unwrap().series.id;
+        let dl_id = app
+            .db
+            .record_chapter_download(series_id, 500.0, dl_file.to_str().unwrap(), Some(20), None)
+            .unwrap();
+        let done_id = app
+            .db
+            .record_chapter_download(
+                series_id,
+                501.0,
+                done_file.to_str().unwrap(),
+                Some(20),
+                None,
+            )
+            .unwrap();
+        app.db.upsert_progress(done_id, 20, true).unwrap();
+        app.reload_chapters().unwrap();
+        let total = app.all_chapters.len();
+
+        app.toggle_chapter_filter();
+        assert_eq!(app.chapter_filter, ChapterFilter::Bookmarked);
+        assert!(app.chapters_list.iter().all(|c| c.chapter.is_bookmarked));
+
+        app.toggle_chapter_filter();
+        assert_eq!(app.chapter_filter, ChapterFilter::Unread);
+        assert!(app.chapters_list.iter().all(|c| !c.is_completed()));
+        assert!(app.chapters_list.iter().any(|c| c.chapter.id == dl_id));
+        assert!(!app.chapters_list.iter().any(|c| c.chapter.id == done_id));
+
+        app.toggle_chapter_filter();
+        assert_eq!(app.chapter_filter, ChapterFilter::Downloaded);
+        assert!(app.chapters_list.iter().all(|c| c.is_downloaded()));
+        assert!(app.chapters_list.iter().any(|c| c.chapter.id == dl_id));
+        assert!(app.chapters_list.iter().any(|c| c.chapter.id == done_id));
+
+        app.toggle_chapter_filter();
+        assert_eq!(app.chapter_filter, ChapterFilter::All);
+        assert_eq!(app.chapters_list.len(), total);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
