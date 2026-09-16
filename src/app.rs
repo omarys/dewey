@@ -1542,6 +1542,30 @@ impl App {
         }
     }
 
+    /// Moves the chapter cursor after the selected chapter was mutated
+    /// (download deleted, marked completed, progress cleared).
+    ///
+    /// Step past `chapter_id` only while it is still listed: if the mutation
+    /// dropped it from the active filter (e.g. the only downloaded chapter
+    /// under the `Downloaded` filter), the next chapter already occupies the
+    /// current index and stepping would skip it.
+    fn advance_chapter_selection_after_mutation(&mut self, chapter_id: i64) {
+        let still_listed = self
+            .chapters_list
+            .get(self.selected_chapter_idx)
+            .is_some_and(|c| c.chapter.id == chapter_id);
+        if still_listed && self.selected_chapter_idx + 1 < self.chapters_list.len() {
+            self.selected_chapter_idx += 1;
+        }
+        if self.chapters_list.is_empty() {
+            self.selected_chapter_idx = 0;
+            self.chapters_state.select(None);
+        } else {
+            self.selected_chapter_idx = self.selected_chapter_idx.min(self.chapters_list.len() - 1);
+            self.chapters_state.select(Some(self.selected_chapter_idx));
+        }
+    }
+
     pub fn toggle_chapter_filter(&mut self) {
         self.chapter_filter = self.chapter_filter.next();
         self.apply_chapter_filter();
@@ -2902,12 +2926,7 @@ impl App {
             let _ = self.reload_series();
 
             // 5. Move selection to the next chapter, mirroring mark-completed
-            if !self.chapters_list.is_empty()
-                && self.selected_chapter_idx + 1 < self.chapters_list.len()
-            {
-                self.selected_chapter_idx += 1;
-                self.chapters_state.select(Some(self.selected_chapter_idx));
-            }
+            self.advance_chapter_selection_after_mutation(chapter_id);
 
             self.set_toast(
                 format!("Deleted download for Chapter {:.1}", chapter_number),
@@ -3018,12 +3037,8 @@ impl App {
             self.set_toast(msg, false);
 
             // Automatically move down to the next chapter in the list if marked completed
-            if is_now_completed
-                && !self.chapters_list.is_empty()
-                && self.selected_chapter_idx + 1 < self.chapters_list.len()
-            {
-                self.selected_chapter_idx += 1;
-                self.chapters_state.select(Some(self.selected_chapter_idx));
+            if is_now_completed {
+                self.advance_chapter_selection_after_mutation(chapter_id);
             }
         }
         Ok(())
@@ -3067,12 +3082,7 @@ impl App {
                     );
 
                     // Automatically move down to the next chapter in the list
-                    if !self.chapters_list.is_empty()
-                        && self.selected_chapter_idx + 1 < self.chapters_list.len()
-                    {
-                        self.selected_chapter_idx += 1;
-                        self.chapters_state.select(Some(self.selected_chapter_idx));
-                    }
+                    self.advance_chapter_selection_after_mutation(chapter_id);
                 }
                 Err(err) => self.set_toast(format!("Failed to clear progress: {}", err), true),
             }
@@ -3806,6 +3816,60 @@ mod tests {
         assert_eq!(app.selected_chapter_idx, 1);
         assert_eq!(app.current_chapter().unwrap().chapter.id, next_id);
         assert_ne!(next_id, deleted_id);
+    }
+
+    #[test]
+    fn test_manual_delete_under_downloaded_filter_does_not_skip_next_chapter() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dewey_del_filter_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let first_file = temp_dir.join("c100.cbz");
+        let second_file = temp_dir.join("c101.cbz");
+        std::fs::write(&first_file, b"a").unwrap();
+        std::fs::write(&second_file, b"b").unwrap();
+
+        let mut app = test_app();
+        let series_id = app.current_series().unwrap().series.id;
+        app.db
+            .record_chapter_download(
+                series_id,
+                100.0,
+                first_file.to_str().unwrap(),
+                Some(10),
+                None,
+            )
+            .unwrap();
+        app.db
+            .record_chapter_download(
+                series_id,
+                101.0,
+                second_file.to_str().unwrap(),
+                Some(10),
+                None,
+            )
+            .unwrap();
+        app.reload_chapters().unwrap();
+
+        app.active_pane = ActivePane::ChaptersList;
+        app.chapter_filter = ChapterFilter::Downloaded;
+        app.selected_chapter_idx = 0;
+        app.apply_chapter_filter();
+
+        assert_eq!(app.chapters_list.len(), 2);
+        let deleted_id = app.current_chapter().unwrap().chapter.id;
+        let next_id = app.chapters_list[1].chapter.id;
+
+        app.request_delete_chapter();
+        app.request_delete_chapter();
+
+        // The deleted chapter dropped out of the filtered list, so its successor
+        // already slid into index 0: the cursor stays there instead of skipping it.
+        assert_eq!(app.selected_chapter_idx, 0);
+        assert_eq!(app.current_chapter().unwrap().chapter.id, next_id);
+        assert_ne!(next_id, deleted_id);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     fn read_after_cleanup_app(delete_after_read: bool, num: f64, file: &Path) -> App {
