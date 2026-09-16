@@ -721,6 +721,42 @@ pub fn render_portrait_tab_bar(f: &mut Frame, area: Rect, app: &mut App, theme: 
 }
 
 /// Touch tap targets: records screen rects so taps can be hit-tested.
+/// One-line status strip above the action bar: persistent active chapter
+/// filter state plus the transient toast. Kept off the action bar row so a
+/// long action list can never clip the message off the edge of the screen.
+pub fn render_status_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let mut spans = Vec::new();
+
+    if app.chapter_filter != ChapterFilter::All {
+        spans.push(Span::styled(
+            format!(
+                " {} Chapters: {} ({} of {}) ",
+                app.chapter_filter.badge(),
+                app.chapter_filter.label(),
+                app.chapters_list.len(),
+                app.all_chapters.len()
+            ),
+            Style::default()
+                .fg(theme.highlight_fg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if let Some((msg, is_error, _)) = &app.toast {
+        spans.push(Span::raw(" "));
+        let toast_style = if *is_error {
+            theme.error_badge().add_modifier(Modifier::BOLD)
+        } else {
+            theme.success_badge().add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
+    }
+
+    let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg));
+    f.render_widget(p, area);
+}
+
 pub fn render_action_bar(
     f: &mut Frame,
     area: Rect,
@@ -777,10 +813,8 @@ pub fn render_action_bar(
             (&series_row1[..], &series_row2[..])
         };
 
-        for (row_idx, (actions, row_area)) in
-            [(row1_actions, row_chunks[0]), (row2_actions, row_chunks[1])]
-                .iter()
-                .enumerate()
+        for (actions, row_area) in
+            [(row1_actions, row_chunks[0]), (row2_actions, row_chunks[1])].iter()
         {
             let mut spans = Vec::new();
             let mut current_x = row_area.x;
@@ -811,18 +845,6 @@ pub fn render_action_bar(
                     format!("[{}] ", key),
                     Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 ));
-            }
-
-            if row_idx == 1 {
-                if let Some((msg, is_error, _)) = &app.toast {
-                    spans.push(Span::raw(" "));
-                    let toast_style = if *is_error {
-                        theme.error_badge().add_modifier(Modifier::BOLD)
-                    } else {
-                        theme.success_badge().add_modifier(Modifier::BOLD)
-                    };
-                    spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
-                }
             }
 
             let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg));
@@ -894,16 +916,6 @@ pub fn render_action_bar(
                 format!("[{}] ", key),
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
-        }
-
-        if let Some((msg, is_error, _)) = &app.toast {
-            spans.push(Span::raw(" "));
-            let toast_style = if *is_error {
-                theme.error_badge().add_modifier(Modifier::BOLD)
-            } else {
-                theme.success_badge().add_modifier(Modifier::BOLD)
-            };
-            spans.push(Span::styled(format!("🔔 {}", msg), toast_style));
         }
 
         let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg));

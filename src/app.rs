@@ -4174,6 +4174,32 @@ mod tests {
     }
 
     #[test]
+    fn test_status_bar_shows_filter_and_toast_without_clipping() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = test_app();
+        app.select_series_index(1);
+        app.toggle_chapter_filter(); // -> Bookmarked, sets a toast
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        // Status strip is the only place with this exact text (the pane title
+        // uses "2. Chapters — ..."), and the toast must not be clipped away.
+        assert!(text.contains("Chapters: Bookmarked"));
+        assert!(text.contains("Chapter filter: Bookmarked only"));
+    }
+
+    #[test]
     fn test_chapter_filter_cycles_unread_and_downloaded() {
         let temp_dir =
             std::env::temp_dir().join(format!("dewey_filter_test_{}", std::process::id()));
