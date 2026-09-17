@@ -79,6 +79,7 @@ Dewey acts as the central orchestration "brain" between your local library, read
 | <kbd>D</kbd> | **Download Next** | Fetch the next un-downloaded chapter in current series |
 | <kbd>s</kbd> | **Scan Library** | Re-scan the designated library folder for new files |
 | <kbd>m</kbd> | **Toggle Read** | Toggle chapter completed / uncompleted status |
+| <kbd>f</kbd> / <kbd>F</kbd> | **Filter Series** | Cycle series filter: All → Unread → Downloaded → Ongoing → Completed |
 | <kbd>B</kbd> | **Filter Chapters** | Cycle chapter filter: All → Bookmarked → Unread → Downloaded |
 | <kbd>u</kbd> | **Mark Unread** | Clear a chapter's progress (page 0, not completed) |
 | <kbd>x</kbd> | **Delete Series** | Remove selected series (press twice to confirm) |

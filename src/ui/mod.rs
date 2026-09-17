@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{ActivePane, App, ChapterFilter};
+use crate::app::{ActivePane, App, ChapterFilter, FilterMode};
 use components::{
     render_action_bar, render_category_modal, render_chapters_list, render_details_pane,
     render_downloads_bar, render_edit_series_modal, render_header, render_help_modal,
@@ -18,7 +18,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let theme = Theme::default();
     let area = f.area();
     let is_portrait = area.height >= area.width || area.width < 100;
-    let show_status = app.toast.is_some() || app.chapter_filter != ChapterFilter::All;
+    let show_status = app.toast.is_some()
+        || app.chapter_filter != ChapterFilter::All
+        || app.filter_mode != FilterMode::All;
 
     if is_portrait {
         let has_downloads = !app.download_jobs.is_empty();

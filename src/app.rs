@@ -127,6 +127,7 @@ pub enum FilterMode {
     #[default]
     All,
     Unread,
+    Downloaded,
     Ongoing,
     Completed,
 }
@@ -135,7 +136,8 @@ impl FilterMode {
     pub fn next(self) -> Self {
         match self {
             FilterMode::All => FilterMode::Unread,
-            FilterMode::Unread => FilterMode::Ongoing,
+            FilterMode::Unread => FilterMode::Downloaded,
+            FilterMode::Downloaded => FilterMode::Ongoing,
             FilterMode::Ongoing => FilterMode::Completed,
             FilterMode::Completed => FilterMode::All,
         }
@@ -145,8 +147,20 @@ impl FilterMode {
         match self {
             FilterMode::All => "All",
             FilterMode::Unread => "Unread",
+            FilterMode::Downloaded => "Downloaded",
             FilterMode::Ongoing => "Ongoing",
             FilterMode::Completed => "Completed",
+        }
+    }
+
+    /// Short glyph shown alongside the label in the status bar and pane title.
+    pub fn badge(self) -> &'static str {
+        match self {
+            FilterMode::All => "",
+            FilterMode::Unread => "\u{25cb}",
+            FilterMode::Downloaded => "\u{2b07}",
+            FilterMode::Ongoing => "",
+            FilterMode::Completed => "",
         }
     }
 }
@@ -493,6 +507,7 @@ impl App {
                         s.stats.completed_chapters < s.stats.total_chapters
                             || s.stats.total_chapters == 0
                     }
+                    FilterMode::Downloaded => s.stats.downloaded_chapters > 0,
                     FilterMode::Ongoing => s
                         .series
                         .status
@@ -1475,7 +1490,13 @@ impl App {
     pub fn toggle_filter_mode(&mut self) {
         self.filter_mode = self.filter_mode.next();
         self.apply_filter();
-        self.set_toast(format!("Status: {}", self.filter_mode.label()), false);
+        let badge = self.filter_mode.badge();
+        let msg = if badge.is_empty() {
+            format!("Status: {}", self.filter_mode.label())
+        } else {
+            format!("Status: {} [{}]", self.filter_mode.label(), badge)
+        };
+        self.set_toast(msg, false);
     }
 
     pub fn cycle_type_filter(&mut self) {
@@ -3305,6 +3326,9 @@ mod tests {
         assert_eq!(app.filter_mode, FilterMode::Unread);
 
         app.toggle_filter_mode();
+        assert_eq!(app.filter_mode, FilterMode::Downloaded);
+
+        app.toggle_filter_mode();
         assert_eq!(app.filter_mode, FilterMode::Ongoing);
 
         app.toggle_filter_mode();
@@ -3325,6 +3349,58 @@ mod tests {
         assert_eq!(app.filter_mode, FilterMode::All);
         assert_eq!(app.type_filter, TypeFilter::All);
         assert_eq!(app.filtered_indices.len(), total);
+    }
+
+    #[test]
+    fn test_series_filter_downloaded() {
+        let mut app = test_app();
+        let total = app.series_list.len();
+        assert_eq!(total, 2);
+
+        // In test_app():
+        // Solo Leveling has 2 downloaded chapters (> 0).
+        // Chainsaw Man has 0 downloaded chapters.
+        let csm = app
+            .series_list
+            .iter()
+            .find(|s| s.series.title == "Chainsaw Man")
+            .unwrap();
+        let solo = app
+            .series_list
+            .iter()
+            .find(|s| s.series.title == "Solo Leveling")
+            .unwrap();
+        assert_eq!(csm.stats.downloaded_chapters, 0);
+        assert_eq!(solo.stats.downloaded_chapters, 2);
+        let csm_id = csm.series.id;
+
+        // Cycle to Downloaded filter
+        app.toggle_filter_mode(); // -> Unread
+        assert_eq!(app.filter_mode, FilterMode::Unread);
+        app.toggle_filter_mode(); // -> Downloaded
+        assert_eq!(app.filter_mode, FilterMode::Downloaded);
+
+        // Only Solo Leveling should match
+        assert_eq!(app.filtered_indices.len(), 1);
+        assert_eq!(app.current_series().unwrap().series.title, "Solo Leveling");
+
+        // Now record a download for Chainsaw Man
+        let temp_dir =
+            std::env::temp_dir().join(format!("dewey_series_filter_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let csm_file = temp_dir.join("csm_01.cbz");
+        std::fs::write(&csm_file, b"content").unwrap();
+
+        app.db
+            .record_chapter_download(csm_id, 1.0, csm_file.to_str().unwrap(), Some(20), None)
+            .unwrap();
+        app.reload_series().unwrap();
+
+        // Now both should match under Downloaded filter
+        assert_eq!(app.filter_mode, FilterMode::Downloaded);
+        assert_eq!(app.filtered_indices.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -4261,6 +4337,30 @@ mod tests {
         // uses "2. Chapters — ..."), and the toast must not be clipped away.
         assert!(text.contains("Chapters: Bookmarked"));
         assert!(text.contains("Chapter filter: Bookmarked only"));
+    }
+
+    #[test]
+    fn test_status_bar_shows_series_filter_downloaded() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = test_app();
+        app.toggle_filter_mode(); // -> Unread
+        app.toggle_filter_mode(); // -> Downloaded
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Series: Downloaded"));
+        assert!(text.contains("Status: Downloaded"));
     }
 
     #[test]

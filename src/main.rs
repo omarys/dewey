@@ -426,7 +426,7 @@ async fn main() -> Result<()> {
                         (KeyCode::Char('/'), KeyModifiers::NONE) => {
                             app.enter_search_mode();
                         }
-                        (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                        (KeyCode::Char('f'), KeyModifiers::NONE) | (KeyCode::Char('F'), _) => {
                             app.toggle_filter_mode();
                         }
                         (KeyCode::Char('T'), _) => {

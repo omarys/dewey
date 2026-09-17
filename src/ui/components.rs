@@ -727,7 +727,36 @@ pub fn render_portrait_tab_bar(f: &mut Frame, area: Rect, app: &mut App, theme: 
 pub fn render_status_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut spans = Vec::new();
 
+    if app.filter_mode != FilterMode::All {
+        let text = if app.filter_mode.badge().is_empty() {
+            format!(
+                " Series: {} ({} of {}) ",
+                app.filter_mode.label(),
+                app.filtered_indices.len(),
+                app.series_list.len()
+            )
+        } else {
+            format!(
+                " {} Series: {} ({} of {}) ",
+                app.filter_mode.badge(),
+                app.filter_mode.label(),
+                app.filtered_indices.len(),
+                app.series_list.len()
+            )
+        };
+        spans.push(Span::styled(
+            text,
+            Style::default()
+                .fg(theme.highlight_fg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     if app.chapter_filter != ChapterFilter::All {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
         spans.push(Span::styled(
             format!(
                 " {} Chapters: {} ({} of {}) ",
@@ -967,7 +996,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  f / F                 ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Cycle status filter (All → Unread → Ongoing → Completed)"),
+            Span::raw("Cycle status filter (All → Unread → Downloaded → Ongoing → Completed)"),
         ]),
         Line::from(vec![
             Span::styled(
