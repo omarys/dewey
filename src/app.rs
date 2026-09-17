@@ -4364,6 +4364,143 @@ mod tests {
     }
 
     #[test]
+    fn test_action_bar_does_not_overflow_screen_on_typical_desktop_widths() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = test_app();
+
+        // 1. Width 160 (reported user screen size where single row overflowed at Help/Quit)
+        {
+            let backend = TestBackend::new(160, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+
+            assert!(text.contains("Read [↵]"));
+            assert!(text.contains("Mode [M]"));
+            assert!(text.contains("Help [?]"));
+            assert!(text.contains("Quit [q]"));
+
+            for (rect, action) in &app.action_rects {
+                assert!(
+                    rect.x + rect.width <= 160,
+                    "Action {:?} rect ({:?}) exceeds width 160",
+                    action,
+                    rect
+                );
+            }
+        }
+
+        // 2. Width 120 (standard terminal)
+        {
+            let backend = TestBackend::new(120, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+
+            assert!(text.contains("Read [↵]"));
+            assert!(text.contains("Mode [M]"));
+            assert!(text.contains("Help [?]"));
+            assert!(text.contains("Quit [q]"));
+
+            for (rect, action) in &app.action_rects {
+                assert!(
+                    rect.x + rect.width <= 120,
+                    "Action {:?} rect ({:?}) exceeds width 120",
+                    action,
+                    rect
+                );
+            }
+        }
+
+        // 3. Width 200 (ultra-wide terminal where single line fits)
+        {
+            let backend = TestBackend::new(200, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+
+            assert!(text.contains("Read [↵]"));
+            assert!(text.contains("Quit [q]"));
+
+            for (rect, action) in &app.action_rects {
+                assert!(
+                    rect.x + rect.width <= 200,
+                    "Action {:?} rect ({:?}) exceeds width 200",
+                    action,
+                    rect
+                );
+            }
+        }
+
+        // 4. Width 80 (narrow / portrait terminal)
+        {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            for (rect, action) in &app.action_rects {
+                assert!(
+                    rect.x + rect.width <= 80,
+                    "Action {:?} rect ({:?}) exceeds width 80",
+                    action,
+                    rect
+                );
+            }
+        }
+
+        // 5. Chapters list active pane
+        {
+            app.active_pane = ActivePane::ChaptersList;
+            let backend = TestBackend::new(120, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+
+            assert!(text.contains("Bookmark [b]"));
+            assert!(text.contains("Delete [x]"));
+
+            for (rect, action) in &app.action_rects {
+                assert!(
+                    rect.x + rect.width <= 120,
+                    "Action {:?} rect ({:?}) exceeds width 120",
+                    action,
+                    rect
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_chapter_filter_cycles_unread_and_downloaded() {
         let temp_dir =
             std::env::temp_dir().join(format!("dewey_filter_test_{}", std::process::id()));

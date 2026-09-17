@@ -8,9 +8,9 @@ use ratatui::{
 
 use crate::app::{ActivePane, App, ChapterFilter, FilterMode};
 use components::{
-    render_action_bar, render_category_modal, render_chapters_list, render_details_pane,
-    render_downloads_bar, render_edit_series_modal, render_header, render_help_modal,
-    render_portrait_tab_bar, render_series_list, render_status_bar,
+    action_bar_height, render_action_bar, render_category_modal, render_chapters_list,
+    render_details_pane, render_downloads_bar, render_edit_series_modal, render_header,
+    render_help_modal, render_portrait_tab_bar, render_series_list, render_status_bar,
 };
 use theme::Theme;
 
@@ -23,6 +23,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         || app.filter_mode != FilterMode::All;
 
     if is_portrait {
+        let max_bar_h = if area.height < 24 { 2 } else { 3 };
+        let action_bar_h = action_bar_height(app, area.width).clamp(1, max_bar_h);
         let has_downloads = !app.download_jobs.is_empty();
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -32,7 +34,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 Constraint::Min(8),                                    // Active List + Details
                 Constraint::Length(if has_downloads { 3 } else { 0 }), // Downloads
                 Constraint::Length(if show_status { 1 } else { 0 }),   // Status / Toast
-                Constraint::Length(2), // Unified 2-row Touch Action Pad
+                Constraint::Length(action_bar_h),                      // Unified Action Bar
             ])
             .split(area);
 
@@ -71,9 +73,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
             render_status_bar(f, main_chunks[4], app, &theme);
         }
 
-        render_action_bar(f, main_chunks[5], app, &theme, true);
+        render_action_bar(f, main_chunks[5], app, &theme);
     } else {
         app.tab_rects.clear();
+        let action_bar_h = action_bar_height(app, area.width).clamp(1, 2);
         let has_downloads = !app.download_jobs.is_empty();
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -82,7 +85,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 Constraint::Min(12),                                   // Body (Desktop Layout)
                 Constraint::Length(if has_downloads { 3 } else { 0 }), // Downloads
                 Constraint::Length(if show_status { 1 } else { 0 }),   // Status / Toast
-                Constraint::Length(1),                                 // Unified Action Bar
+                Constraint::Length(action_bar_h),                      // Unified Action Bar
             ])
             .split(area);
 
@@ -149,7 +152,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             render_status_bar(f, main_chunks[3], app, &theme);
         }
 
-        render_action_bar(f, main_chunks[4], app, &theme, false);
+        render_action_bar(f, main_chunks[4], app, &theme);
     }
 
     if app.input_mode == crate::app::InputMode::CategoryPicker {

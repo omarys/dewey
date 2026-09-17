@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{ActivePane, App, AppAction, ChapterFilter, FilterMode, InputMode};
 use crate::ui::theme::Theme;
+use unicode_width::UnicodeWidthStr;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -786,119 +787,17 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(p, area);
 }
 
-pub fn render_action_bar(
-    f: &mut Frame,
-    area: Rect,
-    app: &mut App,
-    theme: &Theme,
-    is_portrait: bool,
-) {
-    app.action_rects.clear();
+pub fn action_button_width(label: &str, key: &str) -> u16 {
+    let btn_text = format!(" {} [{}]", label, key);
+    UnicodeWidthStr::width(btn_text.as_str()) as u16
+}
 
-    if is_portrait && area.height >= 2 {
-        let row_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(area);
-
-        let series_row1 = [
-            ("📖 Read", "↵", AppAction::Open),
-            ("🔍 Find", "/", AppAction::Search),
-            ("⚡ Status", "f", AppAction::Filter),
-            ("📚 Type", "T", AppAction::CycleType),
-            ("👁 Hidden", ".", AppAction::CycleHidden),
-            ("🏷 Move", "t", AppAction::TagCategory),
-            ("🔒 Hide", "H", AppAction::ToggleHidden),
-        ];
-
-        let series_row2 = [
-            ("➕ Add", "a", AppAction::AddSeries),
-            ("✏ Edit", "e", AppAction::EditSeries),
-            ("⬇ Fetch", "d", AppAction::Fetch),
-            ("📁 Scan", "s", AppAction::Scan),
-            ("✓ Mark", "m", AppAction::MarkRead),
-            ("🔄 Mode", "M", AppAction::Mode),
-            ("❓ Help", "?", AppAction::Help),
-            ("❌ Quit", "q", AppAction::Quit),
-        ];
-
-        let chapters_row1 = [
-            ("📖 Read", "↵", AppAction::Open),
-            ("🔖 Mark", "b", AppAction::ToggleBookmark),
-            ("🔎 Filter", "B", AppAction::FilterChapters),
-            ("✓ Mark", "m", AppAction::MarkRead),
-        ];
-
-        let chapters_row2 = [
-            ("⬇ Fetch", "d", AppAction::Fetch),
-            ("🗑 Del", "x", AppAction::Delete),
-            ("❓ Help", "?", AppAction::Help),
-            ("❌ Quit", "q", AppAction::Quit),
-        ];
-
-        let (row1_actions, row2_actions) = if app.active_pane == ActivePane::ChaptersList {
-            (&chapters_row1[..], &chapters_row2[..])
-        } else {
-            (&series_row1[..], &series_row2[..])
-        };
-
-        for (actions, row_area) in
-            [(row1_actions, row_chunks[0]), (row2_actions, row_chunks[1])].iter()
-        {
-            let mut spans = Vec::new();
-            let mut current_x = row_area.x;
-
-            for (label, key, action) in *actions {
-                let btn_text = format!(" {} [{}] ", label, key);
-                let btn_len = btn_text.chars().count() as u16;
-
-                let rect = Rect {
-                    x: current_x,
-                    y: row_area.y,
-                    width: btn_len,
-                    height: 1,
-                };
-                app.action_rects.push((rect, *action));
-                current_x += btn_len;
-
-                let fg = if *action == AppAction::Quit {
-                    theme.error
-                } else {
-                    theme.accent
-                };
-                spans.push(Span::styled(
-                    format!(" {} ", label),
-                    Style::default().fg(fg),
-                ));
-                spans.push(Span::styled(
-                    format!("[{}] ", key),
-                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-                ));
-            }
-
-            let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg));
-            f.render_widget(p, *row_area);
-        }
-    } else {
-        let series_actions = [
-            ("📖 Read", "↵", AppAction::Open),
-            ("➕ Add", "a", AppAction::AddSeries),
-            ("✏ Edit", "e", AppAction::EditSeries),
-            ("🔍 Find", "/", AppAction::Search),
-            ("⚡ Status", "f", AppAction::Filter),
-            ("📚 Type", "T", AppAction::CycleType),
-            ("👁 Hidden", ".", AppAction::CycleHidden),
-            ("🏷 Move", "t", AppAction::TagCategory),
-            ("🔒 Hide", "H", AppAction::ToggleHidden),
-            ("⬇ Fetch", "d", AppAction::Fetch),
-            ("📁 Scan", "s", AppAction::Scan),
-            ("✓ Mark", "m", AppAction::MarkRead),
-            ("🔄 Mode", "M", AppAction::Mode),
-            ("❓ Help", "?", AppAction::Help),
-            ("❌ Quit", "q", AppAction::Quit),
-        ];
-
-        let chapters_actions = [
+pub fn get_action_rows(
+    app: &App,
+    available_width: u16,
+) -> Vec<Vec<(&'static str, &'static str, AppAction)>> {
+    if app.active_pane == ActivePane::ChaptersList {
+        let all_chapter_actions = [
             ("📖 Read", "↵", AppAction::Open),
             ("🔖 Bookmark", "b", AppAction::ToggleBookmark),
             ("🔎 Filter", "B", AppAction::FilterChapters),
@@ -910,27 +809,158 @@ pub fn render_action_bar(
             ("❌ Quit", "q", AppAction::Quit),
         ];
 
-        let actions = if app.active_pane == ActivePane::ChaptersList {
-            &chapters_actions[..]
-        } else {
-            &series_actions[..]
+        let total_width: u16 = all_chapter_actions
+            .iter()
+            .map(|(label, key, _)| action_button_width(label, key))
+            .sum();
+
+        if total_width <= available_width {
+            return vec![all_chapter_actions.to_vec()];
+        }
+
+        let row1 = [
+            ("📖 Read", "↵", AppAction::Open),
+            ("🔖 Bookmark", "b", AppAction::ToggleBookmark),
+            ("🔎 Filter", "B", AppAction::FilterChapters),
+            ("✓ Mark Read", "m", AppAction::MarkRead),
+        ];
+        let row2 = [
+            ("⬇ Fetch", "d", AppAction::Fetch),
+            ("🗑 Delete", "x", AppAction::Delete),
+            ("📁 Scan", "s", AppAction::Scan),
+            ("❓ Help", "?", AppAction::Help),
+            ("❌ Quit", "q", AppAction::Quit),
+        ];
+
+        let r1_w: u16 = row1.iter().map(|(l, k, _)| action_button_width(l, k)).sum();
+        let r2_w: u16 = row2.iter().map(|(l, k, _)| action_button_width(l, k)).sum();
+
+        if r1_w <= available_width && r2_w <= available_width {
+            return vec![row1.to_vec(), row2.to_vec()];
+        }
+
+        wrap_actions_greedily(&all_chapter_actions, available_width)
+    } else {
+        let all_series_actions = [
+            ("📖 Read", "↵", AppAction::Open),
+            ("➕ Add", "a", AppAction::AddSeries),
+            ("✏ Edit", "e", AppAction::EditSeries),
+            ("🔍 Find", "/", AppAction::Search),
+            ("⚡ Status", "f", AppAction::Filter),
+            ("📚 Type", "T", AppAction::CycleType),
+            ("👁 Hidden", ".", AppAction::CycleHidden),
+            ("🏷 Move", "t", AppAction::TagCategory),
+            ("🔒 Hide", "H", AppAction::ToggleHidden),
+            ("⬇ Fetch", "d", AppAction::Fetch),
+            ("📁 Scan", "s", AppAction::Scan),
+            ("✓ Mark", "m", AppAction::MarkRead),
+            ("🔄 Mode", "M", AppAction::Mode),
+            ("❓ Help", "?", AppAction::Help),
+            ("❌ Quit", "q", AppAction::Quit),
+        ];
+
+        let total_width: u16 = all_series_actions
+            .iter()
+            .map(|(label, key, _)| action_button_width(label, key))
+            .sum();
+
+        if total_width <= available_width {
+            return vec![all_series_actions.to_vec()];
+        }
+
+        let row1 = [
+            ("📖 Read", "↵", AppAction::Open),
+            ("🔍 Find", "/", AppAction::Search),
+            ("⚡ Status", "f", AppAction::Filter),
+            ("📚 Type", "T", AppAction::CycleType),
+            ("👁 Hidden", ".", AppAction::CycleHidden),
+            ("🏷 Move", "t", AppAction::TagCategory),
+            ("🔒 Hide", "H", AppAction::ToggleHidden),
+        ];
+        let row2 = [
+            ("➕ Add", "a", AppAction::AddSeries),
+            ("✏ Edit", "e", AppAction::EditSeries),
+            ("⬇ Fetch", "d", AppAction::Fetch),
+            ("📁 Scan", "s", AppAction::Scan),
+            ("✓ Mark", "m", AppAction::MarkRead),
+            ("🔄 Mode", "M", AppAction::Mode),
+            ("❓ Help", "?", AppAction::Help),
+            ("❌ Quit", "q", AppAction::Quit),
+        ];
+
+        let r1_w: u16 = row1.iter().map(|(l, k, _)| action_button_width(l, k)).sum();
+        let r2_w: u16 = row2.iter().map(|(l, k, _)| action_button_width(l, k)).sum();
+
+        if r1_w <= available_width && r2_w <= available_width {
+            return vec![row1.to_vec(), row2.to_vec()];
+        }
+
+        wrap_actions_greedily(&all_series_actions, available_width)
+    }
+}
+
+fn wrap_actions_greedily(
+    actions: &[(&'static str, &'static str, AppAction)],
+    available_width: u16,
+) -> Vec<Vec<(&'static str, &'static str, AppAction)>> {
+    let mut rows = Vec::new();
+    let mut current_row = Vec::new();
+    let mut current_width = 0;
+
+    for item in actions {
+        let w = action_button_width(item.0, item.1);
+        if !current_row.is_empty() && current_width + w > available_width {
+            rows.push(current_row);
+            current_row = Vec::new();
+            current_width = 0;
+        }
+        current_width += w;
+        current_row.push(*item);
+    }
+    if !current_row.is_empty() {
+        rows.push(current_row);
+    }
+    rows
+}
+
+pub fn action_bar_height(app: &App, available_width: u16) -> u16 {
+    get_action_rows(app, available_width).len() as u16
+}
+
+pub fn render_action_bar(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    app.action_rects.clear();
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let rows = get_action_rows(app, area.width);
+    let visible_rows = (area.height as usize).min(rows.len());
+
+    for (row_idx, row) in rows.iter().take(visible_rows).enumerate() {
+        let row_area = Rect {
+            x: area.x,
+            y: area.y + row_idx as u16,
+            width: area.width,
+            height: 1,
         };
 
         let mut spans = Vec::new();
-        let mut current_x = area.x;
+        let mut current_x = row_area.x;
 
-        for (label, key, action) in actions {
-            let btn_text = format!(" {} [{}] ", label, key);
-            let btn_len = btn_text.chars().count() as u16;
+        for (label, key, action) in row {
+            let btn_width = action_button_width(label, key);
+            if current_x + btn_width > row_area.x + row_area.width {
+                break;
+            }
 
             let rect = Rect {
                 x: current_x,
-                y: area.y,
-                width: btn_len,
+                y: row_area.y,
+                width: btn_width,
                 height: 1,
             };
             app.action_rects.push((rect, *action));
-            current_x += btn_len;
+            current_x += btn_width;
 
             let fg = if *action == AppAction::Quit {
                 theme.error
@@ -942,13 +972,13 @@ pub fn render_action_bar(
                 Style::default().fg(fg),
             ));
             spans.push(Span::styled(
-                format!("[{}] ", key),
+                format!("[{}]", key),
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
         }
 
         let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg));
-        f.render_widget(p, area);
+        f.render_widget(p, row_area);
     }
 }
 
