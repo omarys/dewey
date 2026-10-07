@@ -7,3 +7,6 @@ Cargo.lock
 .DS_Store
 dewey.log
 .pi/*
+
+# openlore analysis artifacts
+.openlore/

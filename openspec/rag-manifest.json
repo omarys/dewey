@@ -1,0 +1,66 @@
+{
+  "generatedAt": "2026-10-07T20:05:00.670Z",
+  "specVersion": "1.0.0",
+  "domains": [
+    {
+      "domain": "app",
+      "specPath": "openspec/specs/app/spec.md",
+      "sourceFiles": [
+        "/home/omary/Dev/dewey/src/config.rs",
+        "/home/omary/Dev/dewey/src/terminal.rs",
+        "/home/omary/Dev/dewey/src/debug_history.rs",
+        "/home/omary/Dev/dewey/src/event.rs",
+        "/home/omary/Dev/dewey/src/app.rs",
+        "/home/omary/Dev/dewey/src/main.rs",
+        "/home/omary/Dev/dewey/src/scanner.rs"
+      ],
+      "requirementCount": 32,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "db",
+      "specPath": "openspec/specs/db/spec.md",
+      "sourceFiles": [
+        "/home/omary/Dev/dewey/src/db/models.rs",
+        "/home/omary/Dev/dewey/src/db/schema.rs",
+        "/home/omary/Dev/dewey/src/db/mod.rs"
+      ],
+      "requirementCount": 23,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "runner",
+      "specPath": "openspec/specs/runner/spec.md",
+      "sourceFiles": [
+        "/home/omary/Dev/dewey/src/runner/continuum.rs",
+        "/home/omary/Dev/dewey/src/runner/labrador.rs",
+        "/home/omary/Dev/dewey/src/runner/mod.rs"
+      ],
+      "requirementCount": 6,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "scripts",
+      "specPath": "openspec/specs/scripts/spec.md",
+      "sourceFiles": [],
+      "requirementCount": 4,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "ui",
+      "specPath": "openspec/specs/ui/spec.md",
+      "sourceFiles": [
+        "/home/omary/Dev/dewey/src/ui/mod.rs",
+        "/home/omary/Dev/dewey/src/ui/theme.rs",
+        "/home/omary/Dev/dewey/src/ui/components.rs"
+      ],
+      "requirementCount": 26,
+      "dependsOn": [],
+      "calledBy": []
+    }
+  ]
+}
