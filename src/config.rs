@@ -68,6 +68,25 @@ pub struct Config {
     /// the chapter record, reading progress, and bookmarks
     #[serde(default)]
     pub delete_after_read: bool,
+
+    /// Settings for importing Komikku/Tachiyomi backups
+    #[serde(default)]
+    pub komikku: KomikkuConfig,
+}
+
+/// Settings for importing Komikku/Tachiyomi backups.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KomikkuConfig {
+    /// Base URL per Komikku source name, used to turn relative chapter links
+    /// (e.g. `/chapters/01J76X`) into absolute fetch URLs. Sources missing here
+    /// keep their chapters without a fetch URL.
+    ///
+    /// ```toml
+    /// [komikku.sources]
+    /// "Weeb Central" = "https://weebcentral.com/"
+    /// ```
+    #[serde(default)]
+    pub sources: std::collections::HashMap<String, String>,
 }
 
 fn default_chapter_stale_hours() -> u64 {
@@ -93,6 +112,7 @@ impl Default for Config {
             max_scan_concurrency: None,
             chapter_stale_hours: 24,
             delete_after_read: false,
+            komikku: KomikkuConfig::default(),
         }
     }
 }
@@ -251,5 +271,32 @@ mod tests {
             Config::auto_detect_storage_profile(Path::new("/home/user/Documents/Manga")),
             StorageProfile::Fast
         );
+    }
+
+    #[test]
+    fn komikku_sources_parse_from_config_and_default_to_empty() {
+        assert!(Config::default().komikku.sources.is_empty());
+
+        let minimal = r#"
+            library_dir = "/tmp/library"
+            db_path = "/tmp/dewey.db"
+            log_file = "/tmp/dewey.log"
+            continuum_bin = "continuum"
+            labrador_bin = "labrador"
+            auto_scan_on_startup = true
+            seed_sample_data = false
+        "#;
+        let cfg: Config = toml::from_str(minimal).expect("config without komikku parses");
+        assert!(cfg.komikku.sources.is_empty());
+
+        let with_sources = format!(
+            "{minimal}\n[komikku.sources]\n\"Weeb Central\" = \"https://weebcentral.com/\"\n\"Manga District\" = \"https://mangadistrict.com/\"\n"
+        );
+        let cfg: Config = toml::from_str(&with_sources).expect("komikku sources parse");
+        assert_eq!(
+            cfg.komikku.sources.get("Weeb Central").map(String::as_str),
+            Some("https://weebcentral.com/")
+        );
+        assert_eq!(cfg.komikku.sources.len(), 2);
     }
 }

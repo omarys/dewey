@@ -138,6 +138,12 @@ seed_sample_data = false
 # exit, manual mark-completed, or mark-series-completed). The chapter record,
 # progress, and bookmarks are kept.
 delete_after_read = false
+
+# Base URL per Komikku/Tachiyomi source, used by --import-komikku to turn
+# relative chapter links into absolute fetch URLs. Sources left out keep their
+# chapters without a fetch URL (they can be matched again later).
+[komikku.sources]
+"Weeb Central" = "https://weebcentral.com/"
 ```
 
 ### SQLite Memory Tradeoff
@@ -175,6 +181,18 @@ dewey -c /path/to/dewey.toml
 # Reset the database and start over (deletes all data)
 dewey --init
 
+# Adopt an existing Komikku/Tachiyomi library: series, chapters, progress,
+# bookmarks and metadata. Try it first without writing anything.
+dewey --import-komikku ~/backups/app.komikku_2026-11-05.tachibk --dry-run
+dewey --import-komikku ~/backups/app.komikku_2026-11-05.tachibk
+
+# Import again, letting the backup's progress overwrite local progress
+dewey --import-komikku ~/backups/app.komikku_2026-11-05.tachibk --replace
+
+# Write the library back out as a Komikku/Tachiyomi backup (round-trips the import)
+dewey --export-komikku ~/backups/dewey-export.tachibk --dry-run
+dewey --export-komikku ~/backups/dewey-export.tachibk
+
 # Direct file launch (runs Continuum with progress tracking & saves on close)
 dewey ~/Documents/Books/Chainsaw_Man/[0001]_Chapter_1.cbz
 ```
@@ -199,6 +217,56 @@ dewey ~/Documents/Books/Chainsaw_Man/[0001]_Chapter_1.cbz
 > target directory contains no comic archives (`.cbz`, `.zip`, `.epub`, `.pdf`,
 > `.cbr`) anywhere in its tree and no database exists yet — an existing library
 > that is temporarily empty still opens normally.
+
+### Importing from Komikku
+
+`--import-komikku <backup.tachibk>` adopts a Komikku/Tachiyomi library. What it
+reads and how it maps:
+
+* **Favorited series only** — one Dewey series per favorited Komikku series.
+  Un-favorited copies of the same title (left behind by source migrations) are
+  merged in, and their reading state is unioned chapter-by-chapter, so progress
+  survives even when the favorite copy looks untouched.
+* **Type tags set the category** — Komikku's `Manga`, `Manhwa` and `Comics`
+  become Dewey categories `Manga`, `Manhwa` and `Comicbook`. Series without one
+  are imported **hidden** (a lone `H` as a hidden manga, anything else as a
+  hidden manhwa) so untriaged entries stay out of the list.
+* **Rating buckets are metadata** — `H`, `Best`, `Good`, `Okay`, `Unrated`,
+  `Partial` are kept in `metadata_json`, never in the category.
+* **Reading mode follows the type** — Manhwa opens as `webtoon`, the rest as
+  `manga`.
+* **Progress and bookmarks** — read markers become completed chapters, page
+  positions become partial progress, and Komikku bookmarks become Dewey
+  bookmarks. Komikku history supplies `last_read_at`.
+* **Re-imports are safe** — existing series keep their category, visibility and
+  reading mode, and progress is unioned (never downgraded) unless you pass
+  `--replace`.
+* **Relative chapter links are not stored** — Weeb Central-style `/chapters/...`
+  paths would break Labrador, so they are only kept once
+  `[komikku.sources]` gives that source a base URL. The report lists every source
+  that is still missing one, with chapter counts: add it to `[komikku.sources]`
+  and re-import with `--replace` to give those chapters a fetch URL.
+
+Always worth a `--dry-run` first; it prints the same report without writing.
+
+### Exporting to Komikku
+
+`--export-komikku <path>` writes the library back out as a `.tachibk` backup, so
+the import is reversible:
+
+* **Every series becomes a favorite** — in Komikku the favorite flag *is* library
+  membership, so anything less would drop series out of the library.
+* **Categories are replayed** — the category names the import recorded are
+  written back verbatim, so a round-trip keeps the same hidden/visible split.
+* **Progress, page positions and bookmarks** travel with the chapters, and read
+  timestamps become Komikku history entries.
+* **Chapters without a fetch URL are skipped** and counted in the report; they are
+  the chapters whose relative links had no base URL at import time. Configure
+  `[komikku.sources]` and re-import to get them back.
+* **Sources, thumbnail URLs and status** are restored from the provenance the
+  import stored, so Komikku can re-resolve each series' extension.
+
+`--dry-run` reports what would be written without creating the file.
 
 ---
 

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS chapters (
     page_count INTEGER,
     fetch_url TEXT,
     is_bookmarked INTEGER NOT NULL DEFAULT 0,
+    title TEXT,
     UNIQUE(series_id, chapter_number)
 );
 

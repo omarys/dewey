@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod debug_history;
 mod event;
+mod komikku;
 mod runner;
 mod scanner;
 mod terminal;
@@ -75,6 +76,22 @@ struct Cli {
     /// Show recent reading history for agentic troubleshooting (hidden)
     #[arg(long = "debug-history", hide = true)]
     debug_history: bool,
+
+    /// Import series, chapters, reading progress and bookmarks from a Komikku/Tachiyomi backup (.tachibk)
+    #[arg(long, value_name = "BACKUP", conflicts_with = "export_komikku")]
+    import_komikku: Option<PathBuf>,
+
+    /// Export the library as a Komikku/Tachiyomi backup (.tachibk)
+    #[arg(long, value_name = "PATH")]
+    export_komikku: Option<PathBuf>,
+
+    /// With --import-komikku or --export-komikku: report what would happen without writing anything
+    #[arg(long)]
+    dry_run: bool,
+
+    /// With --import-komikku: imported reading progress overwrites local progress
+    #[arg(long, requires = "import_komikku")]
+    replace: bool,
 }
 
 fn init_logging(log_path: &Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -104,6 +121,10 @@ fn init_logging(log_path: &Path) -> Result<tracing_appender::non_blocking::Worke
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.dry_run && cli.import_komikku.is_none() && cli.export_komikku.is_none() {
+        anyhow::bail!("--dry-run requires --import-komikku or --export-komikku");
+    }
 
     // 1. Load config file and apply CLI overrides
     let mut config = Config::load_or_create(cli.config.as_deref())?;
@@ -163,6 +184,44 @@ async fn main() -> Result<()> {
             "Database reset at {:?}. A fresh database will be created on next launch.",
             config.db_path
         );
+        return Ok(());
+    }
+
+    // Export runs against an existing library and writes nothing to the database.
+    if let Some(export_path) = cli.export_komikku.as_ref() {
+        use anyhow::bail;
+
+        if !config.db_path.exists() {
+            bail!(
+                "no library database at {} — nothing to export",
+                config.db_path.display()
+            );
+        }
+
+        let db = Database::open_with_profile(&config.db_path, config.storage_profile)?;
+        let report = komikku::export::run(&db, export_path, cli.dry_run)?;
+        print!("{report}");
+        if cli.dry_run {
+            println!("Dry run: no backup file was written.");
+        }
+        return Ok(());
+    }
+
+    // Import runs before the empty-library guard: adopting a Komikku backup is
+    // the point at which an otherwise empty library gains its series.
+    if let Some(backup_path) = cli.import_komikku.as_ref() {
+        use anyhow::bail;
+
+        if !backup_path.is_file() {
+            bail!("backup not found: {}", backup_path.display());
+        }
+
+        let db = Database::open_with_profile(&config.db_path, config.storage_profile)?;
+        let report = komikku::run(&db, backup_path, &config, cli.dry_run, cli.replace)?;
+        print!("{report}");
+        if cli.dry_run {
+            println!("Dry run: no series, chapters or progress were written.");
+        }
         return Ok(());
     }
 

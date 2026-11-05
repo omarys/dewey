@@ -43,6 +43,17 @@ pub struct RemoteChapterInfo {
     pub fetch_url: Option<String>,
 }
 
+/// Reading state for one chapter, as recovered from an external backup.
+#[derive(Debug, Clone)]
+pub struct ImportChapterState {
+    pub chapter_id: i64,
+    pub last_page_read: i64,
+    pub completed: bool,
+    pub bookmarked: bool,
+    /// RFC 3339 timestamp of the last read, when the backup recorded one.
+    pub last_read_at: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -122,6 +133,9 @@ impl Database {
             "ALTER TABLE chapters ADD COLUMN is_bookmarked INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Chapter titles arrive with Komikku imports; older rows stay NULL and
+        // fall back to "Chapter N" when exported.
+        let _ = conn.execute("ALTER TABLE chapters ADD COLUMN title TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chapters_file_path ON chapters(file_path)",
             [],
@@ -218,7 +232,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT
                 c.id, c.series_id, c.chapter_number, c.file_path, c.page_count, c.fetch_url, c.is_bookmarked,
-                p.last_page_read, p.is_completed, p.last_read_at
+                p.last_page_read, p.is_completed, p.last_read_at, c.title
              FROM chapters c
              LEFT JOIN progress p ON c.id = p.chapter_id
              WHERE c.series_id = ?1
@@ -236,6 +250,7 @@ impl Database {
                     page_count: row.get(4)?,
                     fetch_url: row.get(5)?,
                     is_bookmarked: is_bookmarked_int != 0,
+                    title: row.get(10)?,
                 };
 
                 let last_page_read: Option<i64> = row.get(7)?;
@@ -427,6 +442,73 @@ impl Database {
         Ok(())
     }
 
+    /// Applies externally recovered reading state to chapters that already
+    /// exist.
+    ///
+    /// Without `replace` each field is unioned into what is stored (a chapter
+    /// never goes from completed back to unread, a page position never moves
+    /// backwards, timestamps keep the newer value). With `replace` the supplied
+    /// values win outright.
+    pub fn import_chapter_states(
+        &self,
+        entries: &[ImportChapterState],
+        replace: bool,
+    ) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut written = 0;
+
+        {
+            let sql = if replace {
+                "INSERT INTO progress (chapter_id, last_page_read, is_completed, last_read_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(chapter_id) DO UPDATE SET
+                    last_page_read = excluded.last_page_read,
+                    is_completed = excluded.is_completed,
+                    last_read_at = COALESCE(excluded.last_read_at, progress.last_read_at)"
+            } else {
+                "INSERT INTO progress (chapter_id, last_page_read, is_completed, last_read_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(chapter_id) DO UPDATE SET
+                    last_page_read = MAX(progress.last_page_read, excluded.last_page_read),
+                    is_completed = MAX(progress.is_completed, excluded.is_completed),
+                    last_read_at = CASE
+                        WHEN excluded.last_read_at IS NULL THEN progress.last_read_at
+                        WHEN progress.last_read_at IS NULL THEN excluded.last_read_at
+                        WHEN excluded.last_read_at > progress.last_read_at THEN excluded.last_read_at
+                        ELSE progress.last_read_at
+                    END"
+            };
+            let mut progress_stmt = tx.prepare_cached(sql)?;
+            let mut bookmark_stmt =
+                tx.prepare_cached("UPDATE chapters SET is_bookmarked = 1 WHERE id = ?1")?;
+
+            for entry in entries {
+                let has_progress =
+                    entry.completed || entry.last_page_read > 0 || entry.last_read_at.is_some();
+                if has_progress {
+                    progress_stmt.execute(params![
+                        entry.chapter_id,
+                        entry.last_page_read.max(0),
+                        if entry.completed { 1 } else { 0 },
+                        entry.last_read_at
+                    ])?;
+                    written += 1;
+                }
+                if entry.bookmarked {
+                    bookmark_stmt.execute(params![entry.chapter_id])?;
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(written)
+    }
+
     pub fn record_chapter_download(
         &self,
         series_id: i64,
@@ -549,14 +631,20 @@ impl Database {
 
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO chapters (series_id, chapter_number, file_path, page_count, fetch_url)
-                 VALUES (?1, ?2, NULL, NULL, ?3)
+                "INSERT INTO chapters (series_id, chapter_number, file_path, page_count, fetch_url, title)
+                 VALUES (?1, ?2, NULL, NULL, ?3, ?4)
                  ON CONFLICT(series_id, chapter_number) DO UPDATE SET
-                    fetch_url = COALESCE(?3, fetch_url)",
+                    fetch_url = COALESCE(?3, fetch_url),
+                    title = COALESCE(?4, title)",
             )?;
 
             for entry in chapters {
-                stmt.execute(params![series_id, entry.chapter_number, entry.fetch_url,])?;
+                stmt.execute(params![
+                    series_id,
+                    entry.chapter_number,
+                    entry.fetch_url,
+                    entry.title
+                ])?;
                 count += 1;
             }
         }

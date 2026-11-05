@@ -10,3 +10,5 @@ dewey.log
 
 # openlore analysis artifacts
 .openlore/
+**/*.tachibk
+.unipi/

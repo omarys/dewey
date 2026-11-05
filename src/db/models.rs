@@ -61,6 +61,8 @@ pub struct Chapter {
     pub page_count: Option<i64>,
     pub fetch_url: Option<String>,
     pub is_bookmarked: bool,
+    /// Human-readable chapter title, when the source or an import supplied one.
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +168,7 @@ mod tests {
                 page_count: Some(25),
                 fetch_url: None,
                 is_bookmarked: false,
+                title: None,
             },
             progress: None,
         };
@@ -185,6 +188,7 @@ mod tests {
                 page_count: Some(52),
                 fetch_url: None,
                 is_bookmarked: false,
+                title: None,
             },
             progress: None,
         };
@@ -202,6 +206,7 @@ mod tests {
                 page_count: Some(19),
                 fetch_url: None,
                 is_bookmarked: false,
+                title: None,
             },
             progress: None,
         };
@@ -218,6 +223,7 @@ mod tests {
                 page_count: Some(30),
                 fetch_url: None,
                 is_bookmarked: false,
+                title: None,
             },
             progress: None,
         };
