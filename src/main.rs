@@ -22,7 +22,7 @@ use config::Config;
 use db::Database;
 use debug_history::DebugHistory;
 use event::{AppEvent, EventHandler};
-use runner::ContinuumRunner;
+use runner::{ContinuumRunner, EditorRunner};
 use terminal::Tui;
 
 #[derive(Parser, Debug)]
@@ -33,7 +33,9 @@ use terminal::Tui;
     about = "TUI Library Manager for Continuum and Labrador"
 )]
 struct Cli {
-    /// Optional comic/chapter file (.cbz, .zip) to launch directly in Continuum with progress tracking
+    /// Optional file to launch directly with progress tracking: archives
+    /// (.cbz, .zip, .pdf, .epub, .cbr) open in Continuum, plain-text chapters
+    /// (.txt, .md) open in $EDITOR
     #[arg(value_name = "FILE")]
     file: Option<PathBuf>,
 
@@ -258,6 +260,21 @@ async fn main() -> Result<()> {
     if let Some(target_file) = cli.file.as_ref().filter(|p| !p.is_dir()) {
         let abs_path = std::fs::canonicalize(target_file).unwrap_or(target_file.clone());
         let chapter_id = db.get_or_create_chapter_for_file(&abs_path)?;
+
+        // Plain-text chapters (light novels) are read in $EDITOR, not Continuum.
+        if crate::scanner::LibraryScanner::is_text_chapter(&abs_path) {
+            let editor =
+                EditorRunner::new(config.editor.as_deref(), config.markdown_viewer.as_deref());
+            println!(
+                "📖 Opening {:?} in {}...",
+                abs_path.file_name().unwrap_or_default(),
+                editor.command_for(&abs_path)
+            );
+            editor.open_and_wait(&abs_path)?;
+            db.mark_chapter_opened(chapter_id)?;
+            println!("✓ Chapter opened — press m in the TUI once you finish reading it.");
+            return Ok(());
+        }
 
         let (series_id, last_page, chapter_num, series_mode, series_title) = {
             let conn = db.get_progress_for_file(&abs_path)?;

@@ -1,6 +1,6 @@
 # Dewey
 
-Dewey is a keyboard-driven TUI library manager and orchestration brain for comic, manga, and manhwa collections, managing metadata, reading progress, and external companion tools.
+Dewey is a keyboard-driven TUI library manager and orchestration brain for comic, manga, manhwa, and light-novel collections, managing metadata, reading progress, and external companion tools.
 
 ## Language
 
@@ -11,16 +11,20 @@ The designated local root directory containing Series folders, scanned by Dewey 
 _Avoid_: Collection, workspace, book directory
 
 **Series**:
-A cohesive comic, manga, or manhwa work consisting of an ordered sequence of Chapters, cover art, and metadata.
+A cohesive comic, manga, manhwa, or light-novel work consisting of an ordered sequence of Chapters, cover art, and metadata.
 _Avoid_: Title, book, comic, folder
 
 **Chapter**:
-A single numbered installment within a Series, identified by a fractional chapter number, which can be backed by a local Archive or pending remote download.
+A single numbered installment within a Series, identified by a fractional chapter number, which can be backed by a local Archive, a local text file, or a pending remote download.
 _Avoid_: Issue, episode, installment, file
 
 **Archive**:
 The physical local container file (`.cbz`, `.zip`, `.cbr`, `.pdf`, `.epub`) holding compressed page images for a downloaded Chapter.
 _Avoid_: Zip, comic file, payload, bundle
+
+**Text Chapter**:
+A Chapter backed by a plain-text file (`.txt`, `.md`) rather than an Archive, recognised only when its filename carries a chapter number. It has no page count and is read outside Dewey — markdown in a markdown viewer (Leaf, then Glow), anything else in the editor. A Series whose chapters are text is a light novel.
+_Avoid_: Novel file, ebook, document
 
 **Progress**:
 The persisted reading state for a Chapter, strictly bounded to `[0, page_count]`, with an explicit completion status and timestamp.

@@ -168,7 +168,7 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
 
                 let read_indicator = if let Some(last_ch) = s.stats.latest_read_chapter {
                     Span::styled(
-                        format!("Ch.{:.0} ", last_ch),
+                        format!("Ch.{} ", crate::db::models::format_chapter_number(last_ch)),
                         Style::default().fg(theme.accent),
                     )
                 } else {
@@ -280,7 +280,10 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
             .enumerate()
             .map(|(idx, chap)| {
                 let is_selected = idx == app.selected_chapter_idx;
-                let num_str = format!("Ch. {:.1}", chap.chapter.chapter_number);
+                let num_str = format!(
+                    "Ch. {}",
+                    crate::db::models::format_chapter_number(chap.chapter.chapter_number)
+                );
 
                 let read_status = if chap.is_completed() {
                     Span::styled("✓ Completed", theme.success_badge())
@@ -294,6 +297,10 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
                             ),
                             Style::default().fg(theme.warning),
                         )
+                    } else if chap.chapter.page_count.is_none() && prog.last_read_at.is_some() {
+                        // Text chapters (light novels) have no pages to count;
+                        // a progress row only means "this was opened".
+                        Span::styled("Reading", Style::default().fg(theme.warning))
                     } else {
                         Span::styled("Unread", theme.muted_item())
                     }
@@ -526,7 +533,10 @@ pub fn render_details_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) 
 
         // Display selected chapter name/summary
         if let Some(chap) = app.chapters_list.get(app.selected_chapter_idx) {
-            let num_str = format!("Ch. {:.1}", chap.chapter.chapter_number);
+            let num_str = format!(
+                "Ch. {}",
+                crate::db::models::format_chapter_number(chap.chapter.chapter_number)
+            );
             let subtitle = chap.chapter_subtitle();
             let pages_str = match chap.chapter.page_count {
                 Some(p) if p > 0 => format!(" ({} pages)", p),
@@ -603,8 +613,10 @@ pub fn render_downloads_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme)
             let elapsed = job.started_at.elapsed().as_secs();
             spans.push(Span::styled(
                 format!(
-                    " [{}: Ch. {:.1} ({}s)] ",
-                    job.series_title, job.chapter_number, elapsed
+                    " [{}: Ch. {} ({}s)] ",
+                    job.series_title,
+                    crate::db::models::format_chapter_number(job.chapter_number),
+                    elapsed
                 ),
                 Style::default()
                     .fg(theme.highlight_fg)
@@ -700,7 +712,12 @@ pub fn render_portrait_tab_bar(f: &mut Frame, area: Rect, app: &mut App, theme: 
     let chapters_summary = if chapters_is_active {
         Span::styled(
             app.current_chapter()
-                .map(|c| format!("Ch. {:.1}", c.chapter.chapter_number))
+                .map(|c| {
+                    format!(
+                        "Ch. {}",
+                        crate::db::models::format_chapter_number(c.chapter.chapter_number)
+                    )
+                })
                 .unwrap_or_else(|| "No selection".to_string()),
             Style::default()
                 .fg(theme.highlight_fg)

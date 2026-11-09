@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::db::models::{ChapterWithProgress, SeriesWithStats};
 use crate::db::Database;
 use crate::event::{AppEvent, DownloadSuccessPayload, EventHandler};
-use crate::runner::{ContinuumRunner, LabradorRunner};
+use crate::runner::{ContinuumRunner, EditorRunner, LabradorRunner};
 use crate::scanner::LibraryScanner;
 use crate::terminal::Tui;
 
@@ -64,6 +64,7 @@ pub enum TypeFilter {
     Manhwa,
     Manga,
     Comicbook,
+    LightNovel,
 }
 
 impl TypeFilter {
@@ -72,7 +73,8 @@ impl TypeFilter {
             TypeFilter::All => TypeFilter::Manhwa,
             TypeFilter::Manhwa => TypeFilter::Manga,
             TypeFilter::Manga => TypeFilter::Comicbook,
-            TypeFilter::Comicbook => TypeFilter::All,
+            TypeFilter::Comicbook => TypeFilter::LightNovel,
+            TypeFilter::LightNovel => TypeFilter::All,
         }
     }
 
@@ -82,6 +84,7 @@ impl TypeFilter {
             TypeFilter::Manhwa => "Manhwa",
             TypeFilter::Manga => "Manga",
             TypeFilter::Comicbook => "Comicbook",
+            TypeFilter::LightNovel => "Light Novel",
         }
     }
 
@@ -114,6 +117,21 @@ impl TypeFilter {
                         || l.starts_with("comicbook")
                         || l.split('/')
                             .any(|p| p.trim() == "comic" || p.trim() == "comicbook")
+                } else {
+                    false
+                }
+            }
+            TypeFilter::LightNovel => {
+                if let Some(cat) = category {
+                    let l = cat.to_lowercase();
+                    l.starts_with("light novel")
+                        || l.starts_with("novels")
+                        || l.split('/').any(|p| {
+                            matches!(
+                                p.trim(),
+                                "light novel" | "light novels" | "novel" | "novels"
+                            )
+                        })
                 } else {
                     false
                 }
@@ -246,6 +264,8 @@ pub struct App {
     pub db: Database,
     pub continuum_runner: ContinuumRunner,
     pub labrador_runner: LabradorRunner,
+    /// Reads plain-text (light novel) chapters in `$EDITOR`.
+    pub editor_runner: EditorRunner,
 
     pub series_list: Vec<SeriesWithStats>,
     pub selected_series_idx: usize,
@@ -323,6 +343,8 @@ impl App {
         let continuum_runner = ContinuumRunner::new(&config.continuum_bin)
             .with_storage_profile(config.storage_profile.as_str());
         let labrador_runner = LabradorRunner::new(&config.labrador_bin);
+        let editor_runner =
+            EditorRunner::new(config.editor.as_deref(), config.markdown_viewer.as_deref());
 
         let mut series_state = ListState::default();
         series_state.select(Some(0));
@@ -336,6 +358,7 @@ impl App {
             db,
             continuum_runner,
             labrador_runner,
+            editor_runner,
             series_list: Vec::new(),
             selected_series_idx: 0,
             series_state,
@@ -1503,10 +1526,11 @@ impl App {
         self.type_filter = self.type_filter.next();
         self.apply_filter();
         let msg = match self.type_filter {
-            TypeFilter::All => "Showing all types (Manga, Manhwa, Comicbook)",
+            TypeFilter::All => "Showing all types (Manga, Manhwa, Comicbook, Light Novel)",
             TypeFilter::Manhwa => "Filtered by type: Manhwa",
             TypeFilter::Manga => "Filtered by type: Manga",
             TypeFilter::Comicbook => "Filtered by type: Comicbook",
+            TypeFilter::LightNovel => "Filtered by type: Light Novel",
         };
         self.set_toast(msg, false);
     }
@@ -1615,9 +1639,15 @@ impl App {
             self.apply_chapter_filter();
 
             let msg = if is_bookmarked {
-                format!("Chapter {:.1} bookmarked [🔖]", chapter_num)
+                format!(
+                    "Chapter {} bookmarked [🔖]",
+                    crate::db::models::format_chapter_number(chapter_num)
+                )
             } else {
-                format!("Chapter {:.1} bookmark removed", chapter_num)
+                format!(
+                    "Chapter {} bookmark removed",
+                    crate::db::models::format_chapter_number(chapter_num)
+                )
             };
             self.set_toast(msg, false);
         }
@@ -1903,6 +1933,67 @@ impl App {
         Ok(())
     }
 
+    /// Opens a plain-text chapter in the user's editor.
+    ///
+    /// The editor owns the reading position, so all that is recorded is "this
+    /// chapter was opened": an in-progress row for unread chapters, and never an
+    /// un-completion of one already finished. Marking it read stays manual.
+    fn read_text_chapter(
+        &mut self,
+        chapter_id: i64,
+        chapter_num: f64,
+        file_path: &Path,
+        tui: &mut Tui,
+        event_handler: &mut EventHandler,
+    ) -> Result<()> {
+        info!(
+            chapter_id,
+            chapter_num,
+            file = ?file_path,
+            viewer = %self.editor_runner.command_for(file_path),
+            "Suspending TUI to open text chapter in editor"
+        );
+
+        self.set_toast(
+            format!(
+                "Opening Chapter {} in {}...",
+                chapter_num,
+                self.editor_runner.command_for(file_path)
+            ),
+            false,
+        );
+
+        // 1. Suspend background event stream and TUI terminal mode
+        event_handler.suspend();
+        tui.suspend()?;
+
+        // 2. Hand the chapter to the editor and wait for it to exit
+        let result = self.editor_runner.open_and_wait(file_path);
+
+        // 3. Resume TUI terminal mode and fresh background event stream
+        tui.resume()?;
+        event_handler.resume();
+
+        match result {
+            Ok(()) => {
+                self.db.mark_chapter_opened(chapter_id)?;
+                self.reload_chapters()?;
+                self.reload_series()?;
+                self.advance_chapter_selection_after_mutation(chapter_id);
+                self.set_toast(
+                    format!("Chapter {} opened — press m to mark it read", chapter_num),
+                    false,
+                );
+            }
+            Err(err) => {
+                error!(chapter_id, error = %err, "Editor launch failed");
+                self.set_toast(format!("Editor error: {}", err), true);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Reading Loop execution with Continuum integration.
     /// If the chapter is not downloaded, triggers Labrador fetch automatically.
     pub fn read_or_fetch_selected(
@@ -1937,6 +2028,11 @@ impl App {
         let chapter_id = current_chap.chapter.id;
         let chapter_num = current_chap.chapter.chapter_number;
 
+        // Plain-text chapters (light novels) are read in $EDITOR, not Continuum.
+        if LibraryScanner::is_text_chapter(&file_path) {
+            return self.read_text_chapter(chapter_id, chapter_num, &file_path, tui, event_handler);
+        }
+
         let (series_id, series_mode) = self
             .current_series()
             .map(|s| (Some(s.series.id), s.series.reading_mode().to_string()))
@@ -1966,7 +2062,7 @@ impl App {
 
         self.set_toast(
             format!(
-                "Reading Chapter {:.1} in Continuum ({} mode)...",
+                "Reading Chapter {} in Continuum ({} mode)...",
                 chapter_num, series_mode
             ),
             false,
@@ -2070,6 +2166,24 @@ impl App {
         Ok(())
     }
 
+    /// Remembers the provider set checked in Labrador's provider screen, so the
+    /// next launch pre-checks the same providers. No-op when nothing changed.
+    fn remember_providers(&mut self, providers: &[String]) {
+        if providers.is_empty() || providers == self.config.labrador.providers.as_slice() {
+            return;
+        }
+        self.config.labrador.providers = providers.to_vec();
+        match self.config.save() {
+            Ok(path) => {
+                info!(path = %path.display(), providers = ?providers, "Saved Labrador provider selection")
+            }
+            Err(err) => {
+                warn!(error = %err, "Failed to save Labrador provider selection");
+                self.set_toast(format!("Providers not saved: {}", err), true);
+            }
+        }
+    }
+
     /// Checks whether current series has a fetch_url associated.
     /// If not, suspends Dewey and runs Labrador interactive series selector.
     /// Updates series table in SQLite upon selection.
@@ -2094,12 +2208,17 @@ impl App {
         info!(series_id, %series_title, "No fetch_url for series; launching Labrador TUI selector");
         event_handler.suspend();
         tui.suspend()?;
-        let select_res = self.labrador_runner.spawn_interactive_select(&series_title);
+        let saved_providers = self.config.labrador.providers.clone();
+        let select_res = self
+            .labrador_runner
+            .spawn_interactive_select_series(Some(&series_title), &saved_providers);
         tui.resume()?;
         event_handler.resume();
 
         match select_res {
-            Ok(Some(url)) => {
+            Ok(Some(info)) => {
+                self.remember_providers(&info.providers);
+                let url = info.url.clone();
                 info!(series_id, %series_title, %url, "Selected series URL; updating SQLite");
                 self.db.update_series_fetch_url(series_id, &url)?;
                 if let Some(s) = self
@@ -2122,14 +2241,7 @@ impl App {
                             s.series.chapters_checked_at = Some(now);
                         }
 
-                        let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
-                            .into_iter()
-                            .map(|c| crate::db::RemoteChapterInfo {
-                                chapter_number: c.number.unwrap_or(c.index as f64 + 1.0),
-                                title: Some(c.title),
-                                fetch_url: Some(c.url),
-                            })
-                            .collect();
+                        let placeholders = crate::runner::labrador::remote_chapters(&remote_chaps);
                         let _ = self
                             .db
                             .batch_insert_placeholder_chapters(series_id, &placeholders);
@@ -2162,12 +2274,16 @@ impl App {
         info!("Launching Labrador TUI to search and add a new series");
         event_handler.suspend();
         tui.suspend()?;
-        let select_res = self.labrador_runner.spawn_interactive_select_series(None);
+        let saved_providers = self.config.labrador.providers.clone();
+        let select_res = self
+            .labrador_runner
+            .spawn_interactive_select_series(None, &saved_providers);
         tui.resume()?;
         event_handler.resume();
 
         match select_res {
             Ok(Some(info)) => {
+                self.remember_providers(&info.providers);
                 info!(%info.title, %info.url, ?info.provider, "Selected series from Labrador");
 
                 // 1. Check if series already exists in Dewey
@@ -2195,6 +2311,9 @@ impl App {
                     TypeFilter::Manga => Some("Manga".to_string()),
                     TypeFilter::Manhwa => Some("Manhwa".to_string()),
                     TypeFilter::Comicbook => Some("Comicbook".to_string()),
+                    // A remote series is fetched as image chapters by Labrador, so
+                    // a light novel filter still files it under its own shelf.
+                    TypeFilter::LightNovel => Some("Light Novel".to_string()),
                     TypeFilter::All => Some("Manga".to_string()),
                 };
                 let reading_mode = if info.url.contains("mangakatana")
@@ -2254,14 +2373,7 @@ impl App {
                         let _ = self.db.update_series_chapters_checked_at(series_id, now);
                         let count = remote_chaps.len();
                         chapter_count_msg = format!(" ({} chapters)", count);
-                        let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
-                            .into_iter()
-                            .map(|c| crate::db::RemoteChapterInfo {
-                                chapter_number: c.number.unwrap_or(c.index as f64 + 1.0),
-                                title: Some(c.title),
-                                fetch_url: Some(c.url),
-                            })
-                            .collect();
+                        let placeholders = crate::runner::labrador::remote_chapters(&remote_chaps);
                         if let Ok(inserted) = self
                             .db
                             .batch_insert_placeholder_chapters(series_id, &placeholders)
@@ -2320,7 +2432,10 @@ impl App {
             j.series_id == series_id && (j.chapter_number - chapter_number).abs() < f64::EPSILON
         }) {
             self.set_toast(
-                format!("Chapter {:.1} is already being fetched", chapter_number),
+                format!(
+                    "Chapter {} is already being fetched",
+                    crate::db::models::format_chapter_number(chapter_number)
+                ),
                 false,
             );
             return false;
@@ -2346,7 +2461,7 @@ impl App {
         let prefix = toast_prefix.unwrap_or("Fetching");
         self.set_toast(
             format!(
-                "{} '{}' Ch. {:.1} with Labrador in background...",
+                "{} '{}' Ch. {} with Labrador in background...",
                 prefix, series_title, chapter_number
             ),
             false,
@@ -2624,14 +2739,7 @@ impl App {
                     s.series.chapters_checked_at = Some(now);
                 }
 
-                let placeholders: Vec<crate::db::RemoteChapterInfo> = remote_chaps
-                    .into_iter()
-                    .map(|c| crate::db::RemoteChapterInfo {
-                        chapter_number: c.number.unwrap_or(c.index as f64 + 1.0),
-                        title: Some(c.title),
-                        fetch_url: Some(c.url),
-                    })
-                    .collect();
+                let placeholders = crate::runner::labrador::remote_chapters(&remote_chaps);
 
                 let _ = self
                     .db
@@ -2950,14 +3058,20 @@ impl App {
             self.advance_chapter_selection_after_mutation(chapter_id);
 
             self.set_toast(
-                format!("Deleted download for Chapter {:.1}", chapter_number),
+                format!(
+                    "Deleted download for Chapter {}",
+                    crate::db::models::format_chapter_number(chapter_number)
+                ),
                 false,
             );
         } else {
             if file_path_opt.is_none() {
                 self.clear_pending_deletes();
                 self.set_toast(
-                    format!("Chapter {:.1} is not downloaded", chapter_number),
+                    format!(
+                        "Chapter {} is not downloaded",
+                        crate::db::models::format_chapter_number(chapter_number)
+                    ),
                     false,
                 );
                 return;
@@ -2967,7 +3081,7 @@ impl App {
             self.pending_delete_chapter_id = Some(chapter_id);
             self.set_toast(
                 format!(
-                    "Press Delete again to delete download for Ch. {:.1}",
+                    "Press Delete again to delete download for Ch. {}",
                     chapter_number
                 ),
                 false,
@@ -3051,9 +3165,15 @@ impl App {
             }
 
             let msg = if is_now_completed {
-                format!("Chapter {:.1} marked completed [✓]", chapter_num)
+                format!(
+                    "Chapter {} marked completed [✓]",
+                    crate::db::models::format_chapter_number(chapter_num)
+                )
             } else {
-                format!("Chapter {:.1} marked uncompleted", chapter_num)
+                format!(
+                    "Chapter {} marked uncompleted",
+                    crate::db::models::format_chapter_number(chapter_num)
+                )
             };
             self.set_toast(msg, false);
 
@@ -3098,7 +3218,10 @@ impl App {
                     let _ = self.reload_chapters();
                     let _ = self.reload_series();
                     self.set_toast(
-                        format!("Chapter {:.1} marked as unread", chapter_num),
+                        format!(
+                            "Chapter {} marked as unread",
+                            crate::db::models::format_chapter_number(chapter_num)
+                        ),
                         false,
                     );
 
@@ -3157,11 +3280,11 @@ impl App {
 
         let msg = match (payload.fetch_url, payload.series_fetch_url) {
             (Some(url), _) => format!(
-                "Downloaded Ch. {:.1} (Saved source URL: {})",
+                "Downloaded Ch. {} (Saved source URL: {})",
                 payload.chapter_number, url
             ),
             _ => format!(
-                "Downloaded Chapter {:.1} successfully!",
+                "Downloaded Chapter {} successfully!",
                 payload.chapter_number
             ),
         };
@@ -3180,7 +3303,7 @@ impl App {
         self.download_jobs.retain(|j| j.task_id != task_id);
         self.set_toast(
             format!(
-                "Download failed for {} Ch. {:.1}: {}",
+                "Download failed for {} Ch. {}: {}",
                 series_title, chapter_number, error
             ),
             true,
@@ -3211,6 +3334,35 @@ mod tests {
             ..Default::default()
         };
         App::new(cfg, db, tx).unwrap()
+    }
+
+    #[test]
+    fn remember_providers_persists_selection_and_skips_unchanged() {
+        let mut app = test_app();
+        let id = TEST_LIB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cfg_path =
+            std::env::temp_dir().join(format!("dewey_cfg_{}_{}.toml", std::process::id(), id));
+        let _ = std::fs::remove_file(&cfg_path);
+        app.config.source_path = Some(cfg_path.clone());
+
+        let chosen = vec!["weebcentral".to_string(), "webtoons".to_string()];
+        app.remember_providers(&chosen);
+
+        let written = std::fs::read_to_string(&cfg_path).expect("config written");
+        assert!(written.contains("[labrador]"), "got: {written}");
+        assert!(written.contains("weebcentral"));
+        assert_eq!(app.config.labrador.providers, chosen);
+
+        // An unchanged set must not rewrite the file.
+        std::fs::write(&cfg_path, "sentinel").unwrap();
+        app.remember_providers(&chosen);
+        assert_eq!(std::fs::read_to_string(&cfg_path).unwrap(), "sentinel");
+
+        // An empty set (user cancelled / Labrador reported none) is ignored.
+        app.remember_providers(&[]);
+        assert_eq!(app.config.labrador.providers, chosen);
+
+        let _ = std::fs::remove_file(&cfg_path);
     }
 
     #[test]
@@ -3440,10 +3592,36 @@ mod tests {
         assert_eq!(app.type_filter, TypeFilter::Comicbook);
         assert_eq!(app.filtered_indices.len(), 0);
 
-        // 5. Cycle back to All
+        // 5. Cycle to Light Novel -> 0 matches in sample test
+        app.cycle_type_filter();
+        assert_eq!(app.type_filter, TypeFilter::LightNovel);
+        assert_eq!(app.filtered_indices.len(), 0);
+
+        // 6. Cycle back to All
         app.cycle_type_filter();
         assert_eq!(app.type_filter, TypeFilter::All);
         assert_eq!(app.filtered_indices.len(), total);
+    }
+
+    #[test]
+    fn test_light_novel_type_filter() {
+        let mut app = test_app();
+        let id = app.series_list[0].series.id;
+        app.db
+            .update_series_category(id, Some("Light Novel"))
+            .unwrap();
+        app.reload_series().unwrap();
+
+        app.type_filter = TypeFilter::LightNovel;
+        app.apply_filter();
+        assert_eq!(app.filtered_indices.len(), 1);
+        assert_eq!(app.current_series().unwrap().series.id, id);
+
+        // Shelves that merely contain a novel are matched through the path too.
+        assert!(TypeFilter::LightNovel.matches(Some("Light Novel/Isekai"), None));
+        assert!(TypeFilter::LightNovel.matches(Some("Novels"), None));
+        assert!(!TypeFilter::LightNovel.matches(Some("Manga"), None));
+        assert!(!TypeFilter::LightNovel.matches(None, Some("webtoon")));
     }
 
     #[test]

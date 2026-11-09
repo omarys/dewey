@@ -46,6 +46,20 @@ pub struct Config {
     /// Path to Labrador scraper executable
     pub labrador_bin: PathBuf,
 
+    /// Settings for searching series through Labrador
+    #[serde(default)]
+    pub labrador: LabradorConfig,
+
+    /// Editor used to read plain-text (light novel) chapters. Resolution order:
+    /// this value, then `$EDITOR`, then `$VISUAL`, then `vi`.
+    #[serde(default)]
+    pub editor: Option<String>,
+
+    /// Viewer for markdown chapters. Omit to auto-detect Leaf, then Glow, then
+    /// fall back to the editor; set to `"editor"` to always use the editor.
+    #[serde(default)]
+    pub markdown_viewer: Option<String>,
+
     /// Automatically scan the library directory on startup
     pub auto_scan_on_startup: bool,
 
@@ -72,6 +86,25 @@ pub struct Config {
     /// Settings for importing Komikku/Tachiyomi backups
     #[serde(default)]
     pub komikku: KomikkuConfig,
+
+    /// Where this config was loaded from, so runtime changes can be written back.
+    /// Not part of the file format.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
+}
+
+/// Settings for searching series through Labrador.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LabradorConfig {
+    /// Providers searched when adding a series, in the order they are shown.
+    /// Empty means "every provider Labrador reports".
+    ///
+    /// ```toml
+    /// [labrador]
+    /// providers = ["weebcentral", "webtoons"]
+    /// ```
+    #[serde(default)]
+    pub providers: Vec<String>,
 }
 
 /// Settings for importing Komikku/Tachiyomi backups.
@@ -106,6 +139,9 @@ impl Default for Config {
             log_file: PathBuf::from(format!("{}/.local/state/dewey/dewey.log", home)),
             continuum_bin: PathBuf::from("continuum"),
             labrador_bin: PathBuf::from("labrador"),
+            labrador: LabradorConfig::default(),
+            editor: None,
+            markdown_viewer: None,
             auto_scan_on_startup: true,
             seed_sample_data: false,
             storage_profile: StorageProfile::Fast,
@@ -113,6 +149,7 @@ impl Default for Config {
             chapter_stale_hours: 24,
             delete_after_read: false,
             komikku: KomikkuConfig::default(),
+            source_path: None,
         }
     }
 }
@@ -161,6 +198,7 @@ impl Config {
             let mut cfg: Config = toml::from_str(&content)
                 .with_context(|| format!("Failed to parse config file {:?}", path))?;
             cfg.resolve_tilde();
+            cfg.source_path = Some(path.clone());
 
             // Legacy configs generated before canonical XDG defaults used
             // cwd-relative db_path/log_file ("dewey.db"/"dewey.log"), which
@@ -183,15 +221,34 @@ impl Config {
             }
             Ok(cfg)
         } else {
-            let cfg = Config::default();
+            let mut cfg = Config::default();
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
+            cfg.source_path = Some(path.clone());
             if let Ok(toml_str) = toml::to_string_pretty(&cfg) {
                 let _ = fs::write(&path, toml_str);
             }
             Ok(cfg)
         }
+    }
+
+    /// Writes this config back to the file it came from (or the default path),
+    /// preserving everything already in it. Returns the path written.
+    pub fn save(&self) -> Result<PathBuf> {
+        let path = self
+            .source_path
+            .clone()
+            .unwrap_or_else(Self::default_config_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
+        }
+        let toml_str = toml::to_string_pretty(self)
+            .with_context(|| format!("Failed to serialize config for {:?}", path))?;
+        fs::write(&path, toml_str)
+            .with_context(|| format!("Failed to write config to {:?}", path))?;
+        Ok(path)
     }
 
     pub fn default_config_path() -> PathBuf {
@@ -228,6 +285,23 @@ fn expand_tilde(path: &Path, home: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_labrador_providers_round_trip() {
+        let mut cfg = Config::default();
+        cfg.labrador.providers = vec!["weebcentral".to_string(), "webtoons".to_string()];
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(toml_str.contains("[labrador]"), "got: {toml_str}");
+        assert!(
+            !toml_str.contains("source_path"),
+            "runtime-only path must not be written: {toml_str}"
+        );
+
+        let back: Config = toml::from_str(&toml_str).expect("parse");
+        assert_eq!(back.labrador.providers, cfg.labrador.providers);
+        assert!(back.source_path.is_none());
+    }
 
     #[test]
     fn test_default_config() {
@@ -270,6 +344,33 @@ mod tests {
         assert_eq!(
             Config::auto_detect_storage_profile(Path::new("/home/user/Documents/Manga")),
             StorageProfile::Fast
+        );
+    }
+
+    #[test]
+    fn editor_is_optional_and_parses_with_arguments() {
+        assert!(
+            Config::default().editor.is_none(),
+            "no editor means $EDITOR"
+        );
+
+        let cfg: Config = toml::from_str(
+            r#"
+            library_dir = "/tmp/library"
+            db_path = "/tmp/dewey.db"
+            log_file = "/tmp/dewey.log"
+            continuum_bin = "continuum"
+            labrador_bin = "labrador"
+            auto_scan_on_startup = true
+            seed_sample_data = false
+            editor = "nvim -u NONE"
+        "#,
+        )
+        .expect("editor parses");
+        assert_eq!(cfg.editor.as_deref(), Some("nvim -u NONE"));
+        assert!(
+            cfg.markdown_viewer.is_none(),
+            "viewer auto-detects by default"
         );
     }
 

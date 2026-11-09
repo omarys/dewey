@@ -102,9 +102,22 @@ impl ChapterWithProgress {
             .unwrap_or(false)
     }
 
-    /// Extracts the chapter title / subtitle from the archive filename.
+    /// Extracts the chapter title / subtitle.
+    ///
+    /// Prefers the title stored with the chapter (imported from Komikku, or
+    /// fetched from the provider), which is the only name a chapter has before
+    /// it is downloaded. Falls back to parsing the archive filename, which is
+    /// what older rows have.
+    ///
     /// E.g. "Berserk - Chapter 6 - Master of the Sword (1).cbz" -> Some("Master of the Sword (1)")
     pub fn chapter_subtitle(&self) -> Option<String> {
+        if let Some(title) = self.chapter.title.as_deref() {
+            let title = title.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+
         let fp = self.chapter.file_path.as_deref()?;
         let stem = Path::new(fp).file_stem()?.to_str()?;
 
@@ -133,6 +146,22 @@ impl ChapterWithProgress {
 
         None
     }
+}
+
+/// Chapter numbers are floats, and they are load-bearing: `105.5` is a real
+/// half chapter, while `1.001` is the second chapter of a prose volume. Print
+/// what is stored — rounding to one decimal collapses 1.001 and 1.012 onto the
+/// same "1.0" label, which makes a whole volume look like duplicates.
+pub fn format_chapter_number(number: f64) -> String {
+    if !number.is_finite() {
+        return "?".to_string();
+    }
+    let rounded = (number * 1000.0).round() / 1000.0;
+    if rounded.fract().abs() < f64::EPSILON {
+        return format!("{}", rounded as i64);
+    }
+    let text = format!("{:.3}", rounded);
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,5 +333,84 @@ mod tests {
 
         s.chapters_checked_at = Some(now - chrono::Duration::hours(100));
         assert!(!s.is_chapter_list_stale(24));
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn format_chapter_number_keeps_volume_subdivisions() {
+        // Whole numbers print clean.
+        assert_eq!(format_chapter_number(1.0), "1");
+        assert_eq!(format_chapter_number(1140.0), "1140");
+        // Prose volumes: the 4th decimal place is meaningless, the 3rd is not.
+        assert_eq!(format_chapter_number(1.001), "1.001");
+        assert_eq!(format_chapter_number(1.012), "1.012");
+        assert_eq!(format_chapter_number(24.005), "24.005");
+        // Comic half/point chapters keep their fraction.
+        assert_eq!(format_chapter_number(105.5), "105.5");
+        assert_eq!(format_chapter_number(1.1), "1.1");
+        assert_eq!(format_chapter_number(1.0000000001), "1");
+    }
+
+    fn chapter_row(title: Option<&str>, file_path: Option<&str>) -> ChapterWithProgress {
+        ChapterWithProgress {
+            chapter: Chapter {
+                id: 1,
+                series_id: 1,
+                chapter_number: 1.001,
+                file_path: file_path.map(str::to_string),
+                page_count: None,
+                fetch_url: None,
+                is_bookmarked: false,
+                title: title.map(str::to_string),
+            },
+            progress: None,
+        }
+    }
+
+    #[test]
+    fn chapter_subtitle_uses_stored_title_for_undownloaded_chapters() {
+        // A chapter fetched from a provider has no file yet — the stored title
+        // is the only name it has, and it must be shown.
+        let row = chapter_row(Some("Volume 1  1 — Could This Be Another World?"), None);
+        assert_eq!(
+            row.chapter_subtitle().as_deref(),
+            Some("Volume 1  1 — Could This Be Another World?")
+        );
+    }
+
+    #[test]
+    fn volume_subdivided_numbers_label_distinctly_and_sort_in_reading_order() {
+        // Real rows from a prose series: volume + position/1000. Rounding these
+        // to one decimal made 1.0, 1.001, 1.01 and 1.012 all read "1.0", which
+        // looked like duplicates and left the list unordered.
+        let mut numbers = [2.0, 1.012, 1.0, 1.001, 1.01, 2.001];
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let labels: Vec<String> = numbers.iter().copied().map(format_chapter_number).collect();
+        assert_eq!(labels, ["1", "1.001", "1.01", "1.012", "2", "2.001"]);
+
+        // Distinct labels is the property that was missing.
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    fn chapter_subtitle_falls_back_to_the_file_name() {
+        let row = chapter_row(
+            None,
+            Some("/lib/Berserk - Chapter 6 - Master of the Sword.cbz"),
+        );
+        assert_eq!(
+            row.chapter_subtitle().as_deref(),
+            Some("Master of the Sword")
+        );
+
+        // Blank titles never win over a usable file name.
+        let row = chapter_row(Some("   "), Some("/lib/Berserk - Chapter 6 - Duel.cbz"));
+        assert_eq!(row.chapter_subtitle().as_deref(), Some("Duel"));
     }
 }

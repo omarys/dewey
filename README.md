@@ -33,7 +33,14 @@ Dewey acts as the central orchestration "brain" between your local library, read
   - Detects cover art (`cover.png`, `cover.jpg`, `folder.jpg`).
   - Robust chapter regex parser (`[0001]_Chapter_1.cbz`, `Solo Leveling - c105.cbz`, `Ch. 12.5.zip`).
   - Reads `.cbz` / `.zip` central directory headers to count pages without decompressing.
-- 🎯 **Direct CLI File Launcher**: Run `dewey /path/to/chapter.cbz` to launch Continuum with progress resumption and auto-saving directly from the shell without entering the full TUI.
+- 📖 **Light Novels (text chapters)**: a series whose chapters are plain text
+  (`.txt`, `.md` with a chapter number in the name) is read in an external viewer
+  instead of Continuum — Dewey suspends the TUI, opens the file, and records that
+  you read it. Markdown goes to **Leaf**, then **Glow**, then your editor; plain
+  text goes straight to the editor. Editor resolution: `editor` config key →
+  `$EDITOR` → `$VISUAL` → `vi`. Text-only series are shelved as `Light Novel`
+  (cycled with `T`).
+- 🎯 **Direct CLI File Launcher**: Run `dewey /path/to/chapter.cbz` to launch Continuum with progress resumption and auto-saving directly from the shell without entering the full TUI, or `dewey /path/to/chapter.md` to open a novel chapter in your editor.
 
 ---
 
@@ -128,6 +135,14 @@ log_file = "~/.local/state/dewey/dewey.log"
 continuum_bin = "continuum"
 labrador_bin = "labrador"
 
+# Editor for reading plain-text (light novel) chapters. Omit to use $EDITOR,
+# then $VISUAL, then vi. Arguments are allowed: "code -w"
+editor = "nvim"
+
+# Viewer for markdown chapters. Omit to auto-detect Leaf, then Glow, then fall
+# back to the editor; set to "editor" to always use the editor.
+markdown_viewer = "leaf"
+
 # Scan the library folder automatically on launch
 auto_scan_on_startup = true
 
@@ -144,6 +159,12 @@ delete_after_read = false
 # chapters without a fetch URL (they can be matched again later).
 [komikku.sources]
 "Weeb Central" = "https://weebcentral.com/"
+
+# Providers pre-checked in Labrador's provider screen when adding a series.
+# Written automatically with whatever you tick there; omit (or leave empty) for
+# Labrador's own default set.
+[labrador]
+providers = ["weebcentral", "webtoons"]
 ```
 
 ### SQLite Memory Tradeoff
@@ -211,12 +232,13 @@ dewey ~/Documents/Books/Chainsaw_Man/[0001]_Chapter_1.cbz
 > `--db-path` if you want a specific DB. When no directory is given (plain
 > `dewey`), the configured `library_dir` / `db_path` are used instead.
 > A directory positional argument is treated as a library directory; a file
-> (`.cbz`/`.zip`) positional still triggers direct-launch.
+> (`.cbz`/`.zip`/`.epub`/`.pdf`/`.cbr`) positional still triggers direct-launch in
+> Continuum, and a `.txt`/`.md` positional opens in your editor.
 >
 > **Empty-library guard**: initialization is skipped (with a message) when the
-> target directory contains no comic archives (`.cbz`, `.zip`, `.epub`, `.pdf`,
-> `.cbr`) anywhere in its tree and no database exists yet — an existing library
-> that is temporarily empty still opens normally.
+> target directory contains no chapters (`.cbz`, `.zip`, `.epub`, `.pdf`, `.cbr`,
+> or numbered `.txt`/`.md`) anywhere in its tree and no database exists yet — an
+> existing library that is temporarily empty still opens normally.
 
 ### Importing from Komikku
 

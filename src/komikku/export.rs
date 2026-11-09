@@ -18,6 +18,8 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+
+use crate::scanner::LIGHT_NOVEL_CATEGORY;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -42,6 +44,9 @@ pub struct ExportReport {
     pub series: usize,
     /// Series that could not be written: no Komikku source binding, or no URL.
     pub series_skipped: usize,
+    /// Light novels left out: Komikku cannot open a text chapter, so exporting
+    /// one would create a series there that has nothing readable behind it.
+    pub light_novels_skipped: usize,
     pub chapters: usize,
     /// Chapters dropped because they have no `fetch_url`.
     pub chapters_without_url: usize,
@@ -54,6 +59,13 @@ impl std::fmt::Display for ExportReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Komikku backup export:")?;
         writeln!(f, "  series: {}", self.series)?;
+        if self.light_novels_skipped > 0 {
+            writeln!(
+                f,
+                "  skipped light novels: {} (text chapters are not a Komikku format)",
+                self.light_novels_skipped
+            )?;
+        }
         if self.series_skipped > 0 {
             writeln!(
                 f,
@@ -109,6 +121,10 @@ pub fn build(db: &Database) -> Result<(Vec<u8>, ExportReport)> {
 
     for row in &all {
         let series = &row.series;
+        if is_light_novel(db, series)? {
+            report.light_novels_skipped += 1;
+            continue;
+        }
         let Some(binding) = binding_for(series, &by_title) else {
             report.series_skipped += 1;
             continue;
@@ -327,6 +343,23 @@ fn binding_for(series: &Series, by_title: &BTreeMap<String, (i64, String)>) -> O
         description: None,
         genre: None,
     })
+}
+
+/// Whether a series is a light novel, and so has no place in a Komikku backup.
+///
+/// Two signals, because either can stand alone: the category the scanner sets on
+/// a text-only series, and the files themselves — a novel whose chapters are
+/// `.md`/`.txt` cannot be handed to a comic reader even if it is tagged Manga.
+fn is_light_novel(db: &Database, series: &Series) -> Result<bool> {
+    let named = series
+        .category
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|category| category.eq_ignore_ascii_case(LIGHT_NOVEL_CATEGORY));
+    if named {
+        return Ok(true);
+    }
+    db.has_text_chapters(series.id)
 }
 
 /// Komikku category names for a series.
@@ -610,6 +643,57 @@ mod tests {
         assert_eq!(manga.history[0].url, "https://weeb.test/c/1");
         // 2026-11-05T10:00:00Z, in the millis Komikku stores.
         assert_eq!(manga.history[0].last_read, 1_793_872_800_000);
+    }
+
+    #[test]
+    fn light_novels_are_never_exported() {
+        let db = library();
+
+        // Tagged as a light novel by the scanner.
+        let tagged = db
+            .insert_or_get_series_full(
+                "Ascendance of a Bookworm",
+                None,
+                false,
+                Some(LIGHT_NOVEL_CATEGORY),
+            )
+            .unwrap();
+        db.update_series_fetch_url(tagged, "https://weeb.test/series/bookworm")
+            .unwrap();
+
+        // Tagged Manga, but its chapters are prose — still not a Komikku series.
+        let disguised = db
+            .insert_or_get_series_full("Mushoku Tensei", None, false, Some("Manga"))
+            .unwrap();
+        db.update_series_fetch_url(disguised, "https://weeb.test/series/mushoku")
+            .unwrap();
+        db.record_chapter_download(
+            disguised,
+            1.0,
+            "/lib/Mushoku Tensei/Mushoku Tensei - Volume 1 Prologue.md",
+            None,
+            Some("https://weeb.test/n/1"),
+        )
+        .unwrap();
+
+        let (bytes, report) = build(&db).unwrap();
+        let backup = read_back(&bytes, "novels");
+
+        assert_eq!(report.light_novels_skipped, 2);
+        assert_eq!(report.series, 1, "only the comic is exported");
+        assert_eq!(report.series_skipped, 0);
+        assert_eq!(backup.mangas.len(), 1);
+        assert_eq!(backup.mangas[0].title, "Solo Leveling");
+        assert!(backup
+            .mangas
+            .iter()
+            .all(|manga| manga.title != "Ascendance of a Bookworm"
+                && manga.title != "Mushoku Tensei"));
+        // Their categories must not leak into the exported category list either.
+        assert!(backup
+            .categories
+            .iter()
+            .all(|category| !category.name.eq_ignore_ascii_case(LIGHT_NOVEL_CATEGORY)));
     }
 
     #[test]

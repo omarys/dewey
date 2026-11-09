@@ -3,6 +3,7 @@
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -13,6 +14,10 @@ use tracing::info;
 use tracing::warn;
 
 use crate::db::{ChapterScanEntry, Database};
+
+/// Category given to a series whose chapters are plain text, when its folder
+/// does not already name a shelf.
+pub const LIGHT_NOVEL_CATEGORY: &str = "Light Novel";
 
 static RE_EXPLICIT_CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(?:chapter|chap|episode|ep|\bch|\bc|\b#)[_\s\.]*([0-9]+(?:\.[0-9]+)?)"#)
@@ -224,7 +229,7 @@ impl LibraryScanner {
                         if !Self::is_special_dir(&p) {
                             subdirs.push(p);
                         }
-                    } else if Self::is_chapter_file(&p) {
+                    } else if Self::is_chapter_entry(&p) {
                         has_direct_archives = true;
                     } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
                         if name.eq_ignore_ascii_case("series.json") {
@@ -238,7 +243,8 @@ impl LibraryScanner {
                     !subdirs.is_empty() && subdirs.iter().all(|d| Self::is_leaf_image_chapter(d));
 
                 // A directory is a Series container if:
-                // 1. It directly contains chapter archives (.cbz, .zip, .pdf, .cbr, .epub)
+                // 1. It directly contains chapter files (.cbz, .zip, .pdf, .cbr,
+                //    .epub, or a numbered .txt/.md light-novel chapter)
                 // 2. OR it directly contains series.json
                 // 3. OR all of its subdirectories are unpacked image chapters (e.g. "Chapter 1", "Chapter 2")
                 if current_dir != library_dir
@@ -371,6 +377,20 @@ impl LibraryScanner {
             Some(category_parts.join("/"))
         };
 
+        // A series whose chapters are plain text is a light novel. The shelf is
+        // only filled in when the path does not already name one, so an explicit
+        // folder (e.g. `Library/Manga/`) still wins over the extension guess.
+        let category = match category {
+            Some(category) => Some(category),
+            None if entries
+                .iter()
+                .any(|p| Self::is_chapter_entry(p) && Self::is_text_chapter(p)) =>
+            {
+                Some(LIGHT_NOVEL_CATEGORY.to_string())
+            }
+            None => None,
+        };
+
         let cover_path = Self::find_cover_image_from_entries(&entries);
         let series_id = db.insert_or_get_series_full(
             &series_title,
@@ -420,7 +440,7 @@ impl LibraryScanner {
         let existing_map = db.get_existing_chapters_by_path(series_id)?;
         let mut chapter_paths: Vec<PathBuf> = entries
             .iter()
-            .filter(|p| Self::is_chapter_file(p) || Self::is_leaf_image_chapter(p))
+            .filter(|p| Self::is_chapter_entry(p) || Self::is_leaf_image_chapter(p))
             .cloned()
             .collect();
 
@@ -434,6 +454,16 @@ impl LibraryScanner {
         let mut to_insert = Vec::new();
         let mut last_known_chap = 0.0;
         let mut bonus_offset = 0.0;
+
+        // Numbers of chapters linked by title during this scan, so two files
+        // that normalize to the same title cannot both claim one row.
+        let mut claimed_numbers: HashSet<u64> = HashSet::new();
+        let mut title_index: HashMap<String, f64> = HashMap::new();
+        for (title, number) in db.get_chapter_titles(series_id)? {
+            title_index
+                .entry(Self::normalize_title(&title))
+                .or_insert(number);
+        }
 
         for path in chapter_paths {
             let explicit_chap = Self::parse_explicit_chapter_number(&path);
@@ -458,13 +488,38 @@ impl LibraryScanner {
             chapters_found += 1;
             let path_str = path.to_string_lossy().to_string();
 
-            // Diff check: if file is already indexed with page_count, skip opening zip
+            // Already linked to a chapter row. Its number came from the provider
+            // (or from an earlier scan), and the file name is not authoritative
+            // for it: prose chapters are named after their title, so
+            // "... - Volume 1 10 — Bottleneck.md" parses as chapter 10 under any
+            // filename rule. Renumbering here silently rewrites the provider's
+            // numbering; only a missing page count is worth fixing.
             if let Some(info) = existing_map.get(&path_str) {
-                if (info.chapter_number - chap_num).abs() > 0.001 {
-                    let _ = db.update_chapter_number(info.id, chap_num);
+                if info.page_count.is_none() {
+                    to_insert.push(ChapterScanEntry {
+                        chapter_number: info.chapter_number,
+                        file_path: path_str,
+                        page_count: Self::detect_page_count(&path),
+                    });
                 }
-                if info.page_count.is_some() {
-                    continue;
+                continue;
+            }
+
+            // A file whose title matches a known chapter is that chapter, even
+            // if its name carries no usable number. Labrador names text
+            // chapters "<series> - <chapter title>", so the title is the only
+            // reliable link between a downloaded file and its row.
+            let title_key = Self::normalize_title(&Self::title_from_filename(&path));
+            if !title_key.is_empty() {
+                if let Some(&num) = title_index.get(&title_key) {
+                    if claimed_numbers.insert(num.to_bits()) {
+                        to_insert.push(ChapterScanEntry {
+                            chapter_number: num,
+                            file_path: path_str,
+                            page_count: Self::detect_page_count(&path),
+                        });
+                        continue;
+                    }
                 }
             }
 
@@ -490,8 +545,29 @@ impl LibraryScanner {
         }
     }
 
-    /// True if `dir` (recursively) contains any chapter archive
-    /// (.cbz/.zip/.epub/.pdf/.cbr). Used to refuse initializing an empty
+    /// True if `path` is a plain-text chapter, i.e. something to read in $EDITOR
+    /// rather than in the image viewer.
+    pub fn is_text_chapter(path: &Path) -> bool {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => matches!(ext.to_lowercase().as_str(), "txt" | "md"),
+            None => false,
+        }
+    }
+
+    /// True if `path` is a chapter of any kind.
+    ///
+    /// Archives always count. Text files only count when their name carries a
+    /// chapter number, so a series directory's `README.md` or `notes.txt` is not
+    /// mistaken for chapter 0.
+    pub fn is_chapter_entry(path: &Path) -> bool {
+        if Self::is_chapter_file(path) {
+            return true;
+        }
+        Self::is_text_chapter(path) && Self::parse_chapter_number(path).is_some()
+    }
+
+    /// True if `dir` (recursively) contains any chapter file (.cbz/.zip/.epub/
+    /// .pdf/.cbr, or a numbered .txt/.md). Used to refuse initializing an empty
     /// library with no comic content.
     pub fn has_chapter_files(dir: &Path) -> bool {
         let mut stack = vec![dir.to_path_buf()];
@@ -503,7 +579,7 @@ impl LibraryScanner {
                         if !Self::is_special_dir(&p) {
                             stack.push(p);
                         }
-                    } else if Self::is_chapter_file(&p) {
+                    } else if Self::is_chapter_entry(&p) {
                         return true;
                     }
                 }
@@ -687,6 +763,43 @@ impl LibraryScanner {
         last_num
     }
 
+    /// Strips the series prefix and extension from a chapter file name, leaving
+    /// the part that corresponds to a chapter's stored title.
+    ///
+    /// Labrador writes "<series> - <chapter title>.<ext>", so everything after
+    /// the first separator is the title. Falls back to the whole stem when there
+    /// is no separator.
+    pub fn title_from_filename(path: &Path) -> String {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match stem.find(" - ") {
+            Some(idx) => stem[idx + 3..].to_string(),
+            None => stem,
+        }
+    }
+
+    /// Normalizes a chapter title for comparison.
+    ///
+    /// File names are sanitized when written — `?` becomes `_`, `:` becomes `_`,
+    /// and the em dash survives in some writers but not others — so punctuation
+    /// is dropped entirely rather than compared.
+    pub fn normalize_title(title: &str) -> String {
+        let mut out = String::with_capacity(title.len());
+        let mut last_was_space = true;
+        for ch in title.chars() {
+            if ch.is_alphanumeric() {
+                out.extend(ch.to_lowercase());
+                last_was_space = false;
+            } else if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+        }
+        out.trim().to_string()
+    }
+
     /// Detect page count from .cbz/.zip archives or folder
     pub fn detect_page_count(path: &Path) -> Option<i64> {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -744,7 +857,177 @@ struct SeriesMetadataParsed {
 mod tests {
     use super::*;
     use crate::db::Database;
+    use crate::db::RemoteChapterInfo;
     use std::io::Write;
+
+    #[test]
+    fn text_chapters_are_recognised_by_extension() {
+        assert!(LibraryScanner::is_text_chapter(Path::new("Chapter 001.md")));
+        assert!(LibraryScanner::is_text_chapter(Path::new(
+            "Chapter 002.TXT"
+        )));
+        assert!(!LibraryScanner::is_text_chapter(Path::new(
+            "Chapter 003.cbz"
+        )));
+        assert!(!LibraryScanner::is_text_chapter(Path::new("notes.pdf")));
+    }
+
+    #[test]
+    fn text_files_need_a_chapter_number_to_be_chapters() {
+        // Archives are always chapters.
+        assert!(LibraryScanner::is_chapter_entry(Path::new("Vol 1.cbz")));
+        assert!(LibraryScanner::is_chapter_entry(Path::new("something.zip")));
+
+        // Numbered text is a chapter...
+        assert!(LibraryScanner::is_chapter_entry(Path::new(
+            "Chapter 001.md"
+        )));
+        assert!(LibraryScanner::is_chapter_entry(Path::new("12.txt")));
+        assert!(LibraryScanner::is_chapter_entry(Path::new("Volume 3.md")));
+
+        // ...but a directory's prose files are not chapter 0.
+        assert!(!LibraryScanner::is_chapter_entry(Path::new("README.md")));
+        assert!(!LibraryScanner::is_chapter_entry(Path::new("notes.txt")));
+        assert!(!LibraryScanner::is_chapter_entry(Path::new("LICENSE.md")));
+    }
+
+    #[test]
+    fn text_only_series_is_categorised_as_a_light_novel() {
+        let dir = std::env::temp_dir().join(format!(
+            "dewey_novel_scan_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let series_dir = dir.join("Ascendance of a Bookworm");
+        std::fs::create_dir_all(&series_dir).unwrap();
+        for n in 1..=3 {
+            let mut f =
+                std::fs::File::create(series_dir.join(format!("Chapter {:03}.md", n))).unwrap();
+            writeln!(f, "# Chapter {}", n).unwrap();
+        }
+        // Prose files that must not become chapters.
+        std::fs::write(series_dir.join("README.md"), "about this series").unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let summary = LibraryScanner::scan_directory(&db, &dir).unwrap();
+        assert_eq!(summary.chapters_found, 3);
+
+        let series = db.get_all_series().unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(
+            series[0].series.category.as_deref(),
+            Some(LIGHT_NOVEL_CATEGORY)
+        );
+
+        let chapters = db.get_chapters_for_series(series[0].series.id).unwrap();
+        assert_eq!(chapters.len(), 3);
+        assert!(chapters.iter().all(|c| c.chapter.page_count.is_none()));
+        assert!(chapters
+            .iter()
+            .all(|c| c.chapter.file_path.as_deref().unwrap().ends_with(".md")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn downloaded_prose_files_keep_the_provider_chapter_numbers() {
+        // Regression: Labrador names text chapters after their title, so
+        // "Mushoku Tensei - Volume 1 10 — Bottleneck.md" parses as chapter 10.
+        // The scanner used to renumber the linked row to that, which overwrote
+        // the provider's 1.011 and made the first chapter of every volume look
+        // downloaded.
+        let dir = std::env::temp_dir().join(format!(
+            "dewey_novel_numbers_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let series_dir = dir.join("Mushoku Tensei");
+        std::fs::create_dir_all(&series_dir).unwrap();
+
+        let names = [
+            "Mushoku Tensei - Volume 1 Prologue.md",
+            "Mushoku Tensei - Volume 1  1 — Could This Be Another World_.md",
+            "Mushoku Tensei - Volume 1  10 — Bottleneck.md",
+        ];
+        for name in names {
+            std::fs::write(series_dir.join(name), "prose").unwrap();
+        }
+
+        let db = Database::in_memory().unwrap();
+        let series_id = db
+            .insert_or_get_series_full("Mushoku Tensei", None, false, Some(LIGHT_NOVEL_CATEGORY))
+            .unwrap();
+
+        // What the provider reported: volume + position/1000.
+        let remote = vec![
+            RemoteChapterInfo {
+                chapter_number: 1.0,
+                title: Some("Volume 1 Prologue".to_string()),
+                fetch_url: None,
+            },
+            RemoteChapterInfo {
+                chapter_number: 1.001,
+                title: Some("Volume 1  1 — Could This Be Another World?".to_string()),
+                fetch_url: None,
+            },
+            RemoteChapterInfo {
+                chapter_number: 1.011,
+                title: Some("Volume 1  10 — Bottleneck".to_string()),
+                fetch_url: None,
+            },
+            RemoteChapterInfo {
+                chapter_number: 1.012,
+                title: Some("Volume 1  11 — Separation".to_string()),
+                fetch_url: None,
+            },
+            RemoteChapterInfo {
+                chapter_number: 2.0,
+                title: Some("Volume 2 Prologue".to_string()),
+                fetch_url: None,
+            },
+        ];
+        db.batch_insert_placeholder_chapters(series_id, &remote)
+            .unwrap();
+
+        LibraryScanner::scan_directory(&db, &dir).unwrap();
+
+        let chapters = db.get_chapters_for_series(series_id).unwrap();
+        let numbers: Vec<f64> = chapters.iter().map(|c| c.chapter.chapter_number).collect();
+        assert_eq!(
+            numbers,
+            vec![1.0, 1.001, 1.011, 1.012, 2.0],
+            "provider numbering must survive the scan"
+        );
+
+        // Each downloaded file is attached to its own row by title, in order.
+        let linked: Vec<(f64, String)> = chapters
+            .iter()
+            .filter_map(|c| {
+                c.chapter.file_path.as_ref().map(|p| {
+                    (
+                        c.chapter.chapter_number,
+                        Path::new(p)
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .to_string(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(linked.len(), 3);
+        assert!(linked[0].1.contains("Prologue"));
+        assert!(linked[1].1.contains("Could This Be Another World"));
+        assert!(linked[2].1.contains("Bottleneck"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_parse_episode_names() {

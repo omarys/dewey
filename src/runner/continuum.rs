@@ -35,12 +35,12 @@ impl ContinuumExitPayload {
             msg.clone()
         } else if self.completed {
             format!(
-                "🎉 Chapter {:.1} completed! Marked as read [✓]",
+                "🎉 Chapter {} completed! Marked as read [✓]",
                 chapter_number
             )
         } else {
             format!(
-                "📖 Saved progress: Chapter {:.1} @ page {}",
+                "📖 Saved progress: Chapter {} @ page {}",
                 chapter_number, self.last_page
             )
         }
@@ -272,7 +272,7 @@ mod tests {
         );
         assert_eq!(
             payload.completion_message(10.0),
-            "📖 Saved progress: Chapter 10.0 @ page 45"
+            "📖 Saved progress: Chapter 10 @ page 45"
         );
     }
 
@@ -302,7 +302,7 @@ mod tests {
         );
         assert_eq!(
             payload.completion_message(5.0),
-            "🎉 Chapter 5.0 completed! Marked as read [✓]"
+            "🎉 Chapter 5 completed! Marked as read [✓]"
         );
     }
 }

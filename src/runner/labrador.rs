@@ -1,5 +1,7 @@
+use crate::db::RemoteChapterInfo;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::process::Command;
@@ -23,6 +25,10 @@ pub struct SelectedSeriesInfo {
     pub title: String,
     pub url: String,
     pub provider: Option<String>,
+    /// Provider ids that were checked in Labrador's provider screen, so callers
+    /// can remember the user's choice for next time.
+    #[serde(default)]
+    pub providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +45,48 @@ pub struct LabradorChapterItem {
 #[derive(Clone)]
 pub struct LabradorRunner {
     binary_path: PathBuf,
+}
+
+/// Maps a Labrador chapter listing to chapter rows, keeping chapter numbers
+/// unique within the series.
+///
+/// Dewey keys chapters by `(series_id, chapter_number)`, so two chapters that
+/// report the same number collapse into a single row: the later insert wins and
+/// the earlier chapter's title and URL are lost. That is not hypothetical —
+/// prose providers report a *volume* number for every chapter in that volume
+/// (NovelPing reports `1` for each chapter of volume 1), which silently threw
+/// away all but the last chapter of every volume.
+///
+/// When the reported numbers are not unique, the listing's own order (which
+/// providers emit in reading order) is used instead: 1, 2, 3, …
+pub fn remote_chapters(items: &[LabradorChapterItem]) -> Vec<RemoteChapterInfo> {
+    let reported: Vec<f64> = items.iter().map(reported_chapter_number).collect();
+    let keep_reported = all_unique(&reported);
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| RemoteChapterInfo {
+            chapter_number: if keep_reported {
+                reported[idx]
+            } else {
+                (idx + 1) as f64
+            },
+            title: Some(item.title.clone()),
+            fetch_url: Some(item.url.clone()),
+        })
+        .collect()
+}
+
+fn reported_chapter_number(item: &LabradorChapterItem) -> f64 {
+    item.number.unwrap_or(item.index as f64 + 1.0)
+}
+
+fn all_unique(numbers: &[f64]) -> bool {
+    let mut seen = HashSet::with_capacity(numbers.len());
+    numbers
+        .iter()
+        .all(|n| n.is_finite() && seen.insert(n.to_bits()))
 }
 
 impl Default for LabradorRunner {
@@ -79,24 +127,31 @@ impl LabradorRunner {
 
     /// Launches Labrador's interactive TUI to search all feeds, allowing the user to select
     /// a series. If query is Some, searches for that title; if None, opens directly in search input.
+    /// Path to Labrador's interactive picker, pre-checked with `providers`.
+    fn select_command(&self, query: Option<&str>, providers: &[String]) -> std::process::Command {
+        let bin = self.resolve_binary();
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("select").arg("--json");
+        if let Some(q) = query {
+            cmd.arg("--query").arg(q);
+        }
+        if !providers.is_empty() {
+            cmd.arg("--providers").arg(providers.join(","));
+        }
+        cmd
+    }
+
     pub fn spawn_interactive_select_series(
         &self,
         query: Option<&str>,
+        providers: &[String],
     ) -> Result<Option<SelectedSeriesInfo>> {
         let temp_path =
             std::env::temp_dir().join(format!("dewey_labrador_sel_{}.json", std::process::id()));
         let _ = std::fs::remove_file(&temp_path);
 
-        let bin = self.resolve_binary();
-        let mut cmd = std::process::Command::new(&bin);
-        cmd.arg("select")
-            .arg("--json")
-            .arg("--output-file")
-            .arg(&temp_path);
-
-        if let Some(q) = query {
-            cmd.arg("--query").arg(q);
-        }
+        let mut cmd = self.select_command(query, providers);
+        cmd.arg("--output-file").arg(&temp_path);
 
         cmd.stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -127,6 +182,7 @@ impl LabradorRunner {
                     title: query.unwrap_or("").to_string(),
                     url: trimmed.to_string(),
                     provider: None,
+                    providers: Vec::new(),
                 }));
             }
         }
@@ -137,13 +193,6 @@ impl LabradorRunner {
 
     /// Launches Labrador's interactive TUI to search all feeds for series_title,
     /// allowing the user to select the matching series and returning its URL.
-    pub fn spawn_interactive_select(&self, series_title: &str) -> Result<Option<String>> {
-        match self.spawn_interactive_select_series(Some(series_title))? {
-            Some(info) => Ok(Some(info.url)),
-            None => Ok(None),
-        }
-    }
-
     /// Fetches the complete remote chapter listing for a series URL via `labrador chapters --url <url> --json`.
     pub fn fetch_series_chapters(&self, series_url: &str) -> Result<Vec<LabradorChapterItem>> {
         let bin = self.resolve_binary();
@@ -326,7 +375,7 @@ impl LabradorRunner {
             })?,
             Err(_) => {
                 return Err(anyhow!(
-                    "Labrador fetch timed out after 120s for '{}' Ch. {:.1}",
+                    "Labrador fetch timed out after 120s for '{}' Ch. {}",
                     series_title,
                     chapter_number
                 ));
@@ -410,8 +459,9 @@ impl LabradorRunner {
         // Fallback default convention if stdout was purely informational
         let sanitized_series = series_title.replace(' ', "_").to_lowercase();
         let fallback_path = PathBuf::from(format!(
-            "/tmp/manga/{}_c{:.1}.cbz",
-            sanitized_series, chapter_number
+            "/tmp/manga/{}_c{}.cbz",
+            sanitized_series,
+            crate::db::models::format_chapter_number(chapter_number)
         ));
 
         warn!(
@@ -432,6 +482,118 @@ impl LabradorRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chapter(id: &str, title: &str, number: Option<f64>, index: usize) -> LabradorChapterItem {
+        LabradorChapterItem {
+            id: id.to_string(),
+            series_id: None,
+            title: title.to_string(),
+            url: format!("https://example.test/{id}"),
+            number,
+            index,
+            original_label: None,
+        }
+    }
+
+    #[test]
+    fn remote_chapters_keeps_unique_reported_numbers() {
+        let items = vec![
+            chapter("c1", "Chapter 105", Some(105.0), 0),
+            chapter("c2", "Chapter 105.5", Some(105.5), 1),
+            chapter("c3", "Chapter 106", Some(106.0), 2),
+        ];
+
+        let rows = remote_chapters(&items);
+        let numbers: Vec<f64> = rows.iter().map(|r| r.chapter_number).collect();
+        assert_eq!(numbers, vec![105.0, 105.5, 106.0]);
+        assert_eq!(rows[0].title.as_deref(), Some("Chapter 105"));
+        assert_eq!(
+            rows[1].fetch_url.as_deref(),
+            Some("https://example.test/c2")
+        );
+    }
+
+    #[test]
+    fn remote_chapters_falls_back_to_reading_order_when_numbers_repeat() {
+        // NovelPing reports the volume number for every chapter in the volume.
+        let items = vec![
+            chapter("chapter-1", "Volume 1 Prologue", Some(1.0), 0),
+            chapter(
+                "chapter-2",
+                "Volume 1  1 — Could This Be Another World?",
+                Some(1.0),
+                1,
+            ),
+            chapter(
+                "chapter-3",
+                "Volume 1  2 — Expressionless Maid",
+                Some(1.0),
+                2,
+            ),
+            chapter(
+                "chapter-40",
+                "Volume 2 Side Story — Return of Roxy",
+                Some(2.0),
+                3,
+            ),
+        ];
+
+        let rows = remote_chapters(&items);
+        let numbers: Vec<f64> = rows.iter().map(|r| r.chapter_number).collect();
+        assert_eq!(numbers, vec![1.0, 2.0, 3.0, 4.0]);
+        // Every chapter survives with its own title and URL.
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_deref().unwrap()).collect();
+        assert_eq!(titles[0], "Volume 1 Prologue");
+        assert_eq!(titles[2], "Volume 1  2 — Expressionless Maid");
+        assert_eq!(
+            rows[3].fetch_url.as_deref(),
+            Some("https://example.test/chapter-40")
+        );
+    }
+
+    #[test]
+    fn remote_chapters_numbers_chapters_without_a_reported_number() {
+        let items = vec![
+            chapter("a", "One", None, 0),
+            chapter("b", "Two", None, 1),
+            chapter("c", "Three", None, 2),
+        ];
+        let rows = remote_chapters(&items);
+        let numbers: Vec<f64> = rows.iter().map(|r| r.chapter_number).collect();
+        assert_eq!(numbers, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_select_command_passes_saved_providers() {
+        let runner = LabradorRunner::new("labrador");
+        let providers = vec!["weebcentral".to_string(), "webtoons".to_string()];
+        let cmd = runner.select_command(Some("Chainsaw Man"), &providers);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(args[0], "select");
+        assert!(args.contains(&"--query".to_string()));
+        assert!(args.contains(&"Chainsaw Man".to_string()));
+        let providers_arg = args
+            .iter()
+            .position(|a| a == "--providers")
+            .expect("--providers must be passed when a set is saved");
+        assert_eq!(args[providers_arg + 1], "weebcentral,webtoons");
+    }
+
+    #[test]
+    fn test_select_command_omits_empty_provider_list() {
+        let runner = LabradorRunner::new("labrador");
+        let cmd = runner.select_command(None, &[]);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.contains(&"--providers".to_string()));
+        assert!(!args.contains(&"--query".to_string()));
+    }
 
     #[test]
     fn test_parse_labrador_json_output_with_url() {

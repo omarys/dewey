@@ -312,6 +312,25 @@ impl Database {
         Ok(())
     }
 
+    /// Records that a chapter was opened, without touching its completion state.
+    ///
+    /// Used for plain-text chapters: the editor owns the reading position, so all
+    /// Dewey can honestly record is "opened just now" (an in-progress row for an
+    /// unread chapter, and never an un-completion of one already finished).
+    pub fn mark_chapter_opened(&self, chapter_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now_str = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO progress (chapter_id, last_page_read, is_completed, last_read_at)
+             VALUES (?1, 0, 0, ?2)
+             ON CONFLICT(chapter_id) DO UPDATE SET last_read_at = ?2",
+            params![chapter_id, now_str],
+        )?;
+
+        Ok(())
+    }
+
     /// Removes any progress row for the chapter, making it read as unread
     /// (page 0, not completed).
     pub fn delete_progress(&self, chapter_id: i64) -> Result<()> {
@@ -538,6 +557,42 @@ impl Database {
     }
 
     /// Fast indexed lookup of known chapters for diffing during scans
+    /// `(title, chapter_number)` for every titled chapter of a series.
+    ///
+    /// Lets a scan link an already-downloaded file to its row by title, which is
+    /// the only link available for prose chapters: their file names carry the
+    /// title, not the number.
+    /// Whether any chapter of this series is a text file rather than an archive.
+    ///
+    /// Suffices to classify a series as prose: a downloaded light novel is all
+    /// text, and a comic is not.
+    pub fn has_text_chapters(&self, series_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM chapters
+                 WHERE series_id = ?1 AND file_path IS NOT NULL
+                   AND (file_path LIKE '%.md' OR file_path LIKE '%.txt')
+             )",
+            params![series_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    pub fn get_chapter_titles(&self, series_id: i64) -> Result<Vec<(String, f64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT title, chapter_number FROM chapters
+             WHERE series_id = ?1 AND title IS NOT NULL AND trim(title) != ''",
+        )?;
+        let rows = stmt.query_map(params![series_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?;
+
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn get_existing_chapters_by_path(&self, series_id: i64) -> Result<ExistingChaptersMap> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -1133,6 +1188,55 @@ impl Database {
 mod tests {
     use super::*;
 
+    /// Opening a text chapter records "opened now" without forcing completion.
+    #[test]
+    fn mark_chapter_opened_sets_reading_without_completing() {
+        let db = Database::in_memory().unwrap();
+        db.seed_sample_data_if_empty().unwrap();
+        let series_id = db.get_all_series().unwrap()[0].series.id;
+        let chapter_id = db.get_chapters_for_series(series_id).unwrap()[0].chapter.id;
+
+        db.mark_chapter_opened(chapter_id).unwrap();
+
+        let chapters = db.get_chapters_for_series(series_id).unwrap();
+        let chapter = chapters
+            .iter()
+            .find(|c| c.chapter.id == chapter_id)
+            .unwrap();
+        let progress = chapter.progress.as_ref().expect("progress row");
+        assert!(!progress.is_completed, "opening must not mark it read");
+        assert!(
+            progress.last_read_at.is_some(),
+            "open should be timestamped"
+        );
+    }
+
+    /// Re-opening a finished chapter must not un-complete it.
+    #[test]
+    fn mark_chapter_opened_never_uncompletes() {
+        let db = Database::in_memory().unwrap();
+        db.seed_sample_data_if_empty().unwrap();
+        let series_id = db.get_all_series().unwrap()[0].series.id;
+        let chapter_id = db.get_chapters_for_series(series_id).unwrap()[0].chapter.id;
+
+        db.upsert_progress(chapter_id, 5, true).unwrap();
+        db.mark_chapter_opened(chapter_id).unwrap();
+
+        let chapters = db.get_chapters_for_series(series_id).unwrap();
+        let progress = chapters
+            .iter()
+            .find(|c| c.chapter.id == chapter_id)
+            .unwrap()
+            .progress
+            .as_ref()
+            .expect("progress row");
+        assert!(progress.is_completed, "completion must survive a re-open");
+        assert_eq!(
+            progress.last_page_read, 5,
+            "page progress must be preserved"
+        );
+    }
+
     #[test]
     fn test_in_memory_db_and_schema() {
         let db = Database::in_memory().unwrap();
@@ -1533,6 +1637,56 @@ mod tests {
                 .series
                 .is_hidden
         );
+    }
+
+    #[test]
+    fn import_from_prose_provider_keeps_every_chapter_title() {
+        let db = Database::in_memory().unwrap();
+        let s_id = db.insert_or_get_series("Mushoku Tensei").unwrap();
+
+        // A prose provider that reports one number for the whole volume.
+        let items = vec![
+            crate::runner::labrador::LabradorChapterItem {
+                id: "chapter-1".into(),
+                series_id: None,
+                title: "Volume 1 Prologue".into(),
+                url: "https://novelping.example/chapter-1".into(),
+                number: Some(1.0),
+                index: 0,
+                original_label: None,
+            },
+            crate::runner::labrador::LabradorChapterItem {
+                id: "chapter-2".into(),
+                series_id: None,
+                title: "Volume 1  1 — Could This Be Another World?".into(),
+                url: "https://novelping.example/chapter-2".into(),
+                number: Some(1.0),
+                index: 1,
+                original_label: None,
+            },
+            crate::runner::labrador::LabradorChapterItem {
+                id: "chapter-3".into(),
+                series_id: None,
+                title: "Volume 1  2 — Expressionless Maid".into(),
+                url: "https://novelping.example/chapter-3".into(),
+                number: Some(1.0),
+                index: 2,
+                original_label: None,
+            },
+        ];
+
+        let rows = crate::runner::labrador::remote_chapters(&items);
+        db.batch_insert_placeholder_chapters(s_id, &rows).unwrap();
+
+        let chapters = db.get_chapters_for_series(s_id).unwrap();
+        assert_eq!(chapters.len(), 3, "every chapter must get its own row");
+        let titles: Vec<&str> = chapters
+            .iter()
+            .map(|c| c.chapter.title.as_deref().unwrap_or(""))
+            .collect();
+        assert!(titles.contains(&"Volume 1 Prologue"));
+        assert!(titles.contains(&"Volume 1  1 — Could This Be Another World?"));
+        assert!(titles.contains(&"Volume 1  2 — Expressionless Maid"));
     }
 
     #[test]
