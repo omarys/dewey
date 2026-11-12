@@ -1057,7 +1057,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  t                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Tag / move series into category folder (e.g. Manga/Action)"),
+            Span::raw("Move series into category folder (e.g. Manga/Action)"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1071,7 +1071,7 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
                 "  H                     ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Toggle hidden tag on selected series (relocates to/from .Other)"),
+            Span::raw("Toggle hidden flag on selected series (relocates to/from .Other)"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1263,7 +1263,7 @@ pub fn render_category_modal(f: &mut Frame, app: &mut App, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.active_border())
-        .title(format!(" 🏷 Move / Tag [{}] Category ", series_title));
+        .title(format!(" 🏷 Move [{}] Category ", series_title));
 
     let input_p = Paragraph::new(Line::from(vec![
         Span::styled(

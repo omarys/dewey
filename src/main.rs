@@ -511,7 +511,7 @@ async fn main() -> Result<()> {
                         (KeyCode::Char('H'), _) => {
                             if let Err(err) = app.toggle_selected_series_hidden() {
                                 app.set_toast(
-                                    format!("Failed to toggle hidden tag: {}", err),
+                                    format!("Failed to toggle hidden flag: {}", err),
                                     true,
                                 );
                             }
@@ -912,7 +912,7 @@ async fn main() -> Result<()> {
                                     AppAction::ToggleHidden => {
                                         if let Err(err) = app.toggle_selected_series_hidden() {
                                             app.set_toast(
-                                                format!("Failed to toggle hidden tag: {}", err),
+                                                format!("Failed to toggle hidden flag: {}", err),
                                                 true,
                                             );
                                         }
