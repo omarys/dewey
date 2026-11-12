@@ -849,6 +849,27 @@ impl App {
         clean
     }
 
+    /// Finds a series that would be the same library entry as an incoming one.
+    ///
+    /// Identity is the title *and* the media kind: the same story may live in the
+    /// library twice, once as a comic and once as a light novel, so a matching
+    /// title alone must not block an add. Sub-shelves do not split a comic in two.
+    /// A shared `fetch_url` always means the same series.
+    fn find_series_on_shelf(
+        series_list: &[crate::db::models::SeriesWithStats],
+        title: &str,
+        category: Option<&str>,
+        url: &str,
+    ) -> Option<i64> {
+        let wanted = crate::db::media_kind(category);
+        series_list.iter().find_map(|s| {
+            let same_url = s.series.fetch_url.as_deref() == Some(url);
+            let same_shelf = s.series.title.eq_ignore_ascii_case(title)
+                && crate::db::media_kind(s.series.category.as_deref()) == wanted;
+            (same_url || same_shelf).then_some(s.series.id)
+        })
+    }
+
     pub fn find_series_directory(&self, s: &crate::db::models::SeriesWithStats) -> Option<PathBuf> {
         let title = &s.series.title;
 
@@ -2286,27 +2307,7 @@ impl App {
                 self.remember_providers(&info.providers);
                 info!(%info.title, %info.url, ?info.provider, "Selected series from Labrador");
 
-                // 1. Check if series already exists in Dewey
-                let existing_id = self.series_list.iter().find_map(|s| {
-                    if s.series.title.eq_ignore_ascii_case(&info.title)
-                        || s.series.fetch_url.as_deref() == Some(&info.url)
-                    {
-                        Some(s.series.id)
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(id) = existing_id {
-                    if let Some(pos) = self.series_list.iter().position(|s| s.series.id == id) {
-                        self.selected_series_idx = pos;
-                        let _ = self.reload_chapters();
-                    }
-                    self.set_toast(format!("Series '{}' already in library", info.title), false);
-                    return Ok(());
-                }
-
-                // 2. Determine category and reading mode
+                // 1. Determine category and reading mode
                 let category = match self.type_filter {
                     TypeFilter::Manga => Some("Manga".to_string()),
                     TypeFilter::Manhwa => Some("Manhwa".to_string()),
@@ -2324,6 +2325,25 @@ impl App {
                 } else {
                     "webtoon"
                 };
+
+                // 2. Check if the series already exists. Identity is the title *and*
+                //    the shelf: a manhwa and a light novel may share a title, and
+                //    they must be able to sit side by side.
+                let existing_id = Self::find_series_on_shelf(
+                    &self.series_list,
+                    &info.title,
+                    category.as_deref(),
+                    &info.url,
+                );
+
+                if let Some(id) = existing_id {
+                    if let Some(pos) = self.series_list.iter().position(|s| s.series.id == id) {
+                        self.selected_series_idx = pos;
+                        let _ = self.reload_chapters();
+                    }
+                    self.set_toast(format!("Series '{}' already in library", info.title), false);
+                    return Ok(());
+                }
 
                 // 3. Insert series into SQLite
                 let series_id = self.db.insert_or_get_series_full(
@@ -3848,6 +3868,50 @@ mod tests {
         if total_series > 1 {
             assert_eq!(app.selected_series_idx, 1);
         }
+    }
+
+    #[test]
+    fn a_light_novel_can_share_a_title_with_a_manhwa() {
+        let mut app = test_app();
+        let manhwa = app
+            .db
+            .insert_or_get_series_full("Shadow Slave", None, false, Some("Manhwa"))
+            .unwrap();
+        app.reload_series().unwrap();
+
+        let found = |category: Option<&str>, url: &str| {
+            App::find_series_on_shelf(&app.series_list, "Shadow Slave", category, url)
+        };
+
+        assert_eq!(
+            found(Some("Manhwa"), "https://example.test/a"),
+            Some(manhwa),
+            "the same comic is still one series"
+        );
+        assert_eq!(
+            found(Some("Manga/Action"), "https://example.test/a"),
+            Some(manhwa),
+            "a comic filed on another sub-shelf is still the same comic"
+        );
+        assert_eq!(
+            found(
+                Some("Light Novel"),
+                "https://novelarchive.st/series/shadow-slave"
+            ),
+            None,
+            "a light novel of the same name is a new library entry"
+        );
+
+        app.db
+            .insert_or_get_series_full("Shadow Slave", None, false, Some("Light Novel"))
+            .unwrap();
+        app.reload_series().unwrap();
+        let titles = app
+            .series_list
+            .iter()
+            .filter(|s| s.series.title == "Shadow Slave")
+            .count();
+        assert_eq!(titles, 2, "both shelves show up in the library");
     }
 
     #[test]

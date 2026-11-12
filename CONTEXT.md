@@ -11,8 +11,12 @@ The designated local root directory containing Series folders, scanned by Dewey 
 _Avoid_: Collection, workspace, book directory
 
 **Series**:
-A cohesive comic, manga, manhwa, or light-novel work consisting of an ordered sequence of Chapters, cover art, and metadata.
+A cohesive comic, manga, manhwa, or light-novel work consisting of an ordered sequence of Chapters, cover art, and metadata. Identity is the title *and* the Media Kind: a comic and a light novel of the same name are two Series, because they are read differently and downloaded differently.
 _Avoid_: Title, book, comic, folder
+
+**Media Kind**:
+What a Series essentially is — `Comic` (manga, manhwa, comicbook) or `Prose` (light novel). Derived from the Category's first path segment: `Light Novel` is Prose, everything else (including an unshelved Series) is Comic. It is the only part of a Category that participates in Series identity.
+_Avoid_: Format, type, genre
 
 **Chapter**:
 A single numbered installment within a Series, identified by a fractional chapter number, which can be backed by a local Archive, a local text file, or a pending remote download.

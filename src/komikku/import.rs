@@ -33,7 +33,7 @@ use serde_json::json;
 use super::model::{Backup, BackupChapter, BackupManga, BackupSource};
 use crate::config::Config;
 use crate::db::models::SeriesWithStats;
-use crate::db::{Database, ImportChapterState, RemoteChapterInfo};
+use crate::db::{media_kind, Database, ImportChapterState, MediaKind, RemoteChapterInfo};
 
 /// Dewey's library types. `Comicbook` keeps its name deliberately: the category
 /// column is a path fragment and "Comic" would be ambiguous in it.
@@ -61,6 +61,11 @@ impl DeweyType {
     }
 }
 
+/// The shelf a category belongs to: the first path segment, lowercased.
+///
+/// `Manga/Action` and `Manga` are the same shelf, while `Manga` and `Light Novel`
+/// are not — which is what keeps a comic and a prose series apart when they share
+/// a title.
 /// One chapter to be created (or to have its fetch URL refreshed).
 #[derive(Debug, Clone)]
 pub struct PlannedChapter {
@@ -337,10 +342,13 @@ pub fn plan(backup: &Backup, existing: &[SeriesWithStats], config: &Config) -> I
         ..Default::default()
     };
 
-    let mut existing_by_title: HashMap<String, i64> = HashMap::new();
+    let mut existing_by_title: HashMap<(String, MediaKind), i64> = HashMap::new();
     for row in existing {
         existing_by_title
-            .entry(normalize_title(&row.series.title))
+            .entry((
+                normalize_title(&row.series.title),
+                media_kind(row.series.category.as_deref()),
+            ))
             .or_insert(row.series.id);
     }
 
@@ -482,7 +490,9 @@ pub fn plan(backup: &Backup, existing: &[SeriesWithStats], config: &Config) -> I
 
         let primary_categories = category_names_of(primary);
         let (dewey_type, visible) = classify(&primary_categories);
-        let existing_id = existing_by_title.get(title_key).copied();
+        let existing_id = existing_by_title
+            .get(&(title_key.clone(), media_kind(Some(dewey_type.category()))))
+            .copied();
         let status = status_label(primary.status);
         let source_name = source_names.get(&primary.source).copied();
 

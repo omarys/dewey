@@ -11,6 +11,31 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// What a shelf holds: prose (light novels) or comics (manga, manhwa, comicbooks).
+///
+/// Two series may share a title as long as they sit on different kinds of shelf —
+/// a webtoon and its light novel are separate library entries — while two comics
+/// with the same title stay one entry, however their sub-shelves are named. An
+/// unshelved row counts as a comic, which is what library rows looked like before
+/// shelves existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MediaKind {
+    Comic,
+    Prose,
+}
+
+pub fn media_kind(category: Option<&str>) -> MediaKind {
+    let shelf = category
+        .and_then(|c| c.split('/').next())
+        .map(str::trim)
+        .unwrap_or_default();
+    if shelf.eq_ignore_ascii_case(crate::scanner::LIGHT_NOVEL_CATEGORY) {
+        MediaKind::Prose
+    } else {
+        MediaKind::Comic
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChapterScanEntry {
     pub chapter_number: f64,
@@ -907,22 +932,38 @@ impl Database {
         is_hidden: bool,
         category: Option<&str>,
     ) -> Result<i64> {
-        let existing: Option<(i64, Option<String>, Option<String>)> = conn
-            .query_row(
-                "SELECT id, cover_path, category FROM series WHERE title = ?1",
-                params![title],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .ok();
+        // A series is identified by its title *and* by what kind of shelf it sits
+        // on: the same story may be in the library twice, once as a manhwa and once
+        // as a light novel, so one must not block the other. Two comics with the
+        // same title stay one series, even if they were filed under different
+        // sub-shelves.
+        let wanted = media_kind(category);
+        let existing: Option<(i64, Option<String>, Option<String>, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT s.id, s.cover_path, s.category,
+                        (SELECT COUNT(*) FROM chapters c WHERE c.series_id = s.id)
+                   FROM series s
+                  WHERE s.title = ?1
+                  ORDER BY (s.category IS NULL) ASC, s.id ASC",
+            )?;
+            let rows: Vec<(i64, Option<String>, Option<String>, i64)> = stmt
+                .query_map(params![title], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .filter_map(Result::ok)
+                .collect();
+            rows.into_iter()
+                .find(|(_, _, existing_cat, _)| media_kind(existing_cat.as_deref()) == wanted)
+        };
 
-        if let Some((id, existing_cover, existing_cat)) = existing {
+        if let Some((id, existing_cover, existing_cat, chapter_count)) = existing {
             if existing_cover.is_none() && cover_path.is_some() {
                 let _ = conn.execute(
                     "UPDATE series SET cover_path = ?1 WHERE id = ?2",
                     params![cover_path, id],
                 );
             }
-            if existing_cat.is_none() && category.is_some() {
+            if existing_cat.is_none() && category.is_some() && chapter_count == 0 {
                 let _ = conn.execute(
                     "UPDATE series SET category = ?1 WHERE id = ?2",
                     params![category, id],
@@ -1798,6 +1839,85 @@ mod tests {
         db.batch_record_chapters(s_id, &scan_entries).unwrap();
         let chapters = db.get_chapters_for_series(s_id).unwrap();
         assert!(chapters[1].chapter.is_bookmarked);
+    }
+
+    #[test]
+    fn test_same_title_lives_on_different_shelves() {
+        let db = Database::in_memory().unwrap();
+
+        let manhwa = db
+            .insert_or_get_series_full("Shadow Slave", None, false, Some("Manhwa"))
+            .unwrap();
+        let novel = db
+            .insert_or_get_series_full("Shadow Slave", None, false, Some("Light Novel"))
+            .unwrap();
+
+        assert_ne!(
+            manhwa, novel,
+            "a manhwa and a light novel with the same title must be separate series"
+        );
+
+        // Adding the same title to the same shelf stays idempotent.
+        let manhwa_again = db
+            .insert_or_get_series_full("Shadow Slave", None, false, Some("Manhwa"))
+            .unwrap();
+        assert_eq!(manhwa_again, manhwa);
+    }
+
+    #[test]
+    fn test_unshelved_series_is_adopted_while_empty() {
+        let db = Database::in_memory().unwrap();
+
+        let unshelved = db.insert_or_get_series("Dandadan").unwrap();
+        let shelved = db
+            .insert_or_get_series_full("Dandadan", None, false, Some("Manga"))
+            .unwrap();
+
+        assert_eq!(
+            shelved, unshelved,
+            "an empty unshelved row is shelved, not duplicated"
+        );
+
+        let series = db
+            .get_all_series()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.series.title == "Dandadan")
+            .collect::<Vec<_>>();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].series.category.as_deref(), Some("Manga"));
+    }
+
+    #[test]
+    fn test_shelved_series_is_not_relabelled_by_a_later_add() {
+        let db = Database::in_memory().unwrap();
+
+        // A real series: unshelved row that already owns a chapter.
+        let unshelved = db.insert_or_get_series("Solo Leveling").unwrap();
+        db.record_chapter_download(
+            unshelved,
+            1.0,
+            "/lib/Solo Leveling/Ch.1.cbz",
+            Some(40),
+            None,
+        )
+        .unwrap();
+
+        let novel = db
+            .insert_or_get_series_full("Solo Leveling", None, false, Some("Light Novel"))
+            .unwrap();
+
+        assert_ne!(
+            novel, unshelved,
+            "a series that owns chapters must not be relabelled onto another shelf"
+        );
+        let rows = db
+            .get_all_series()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.series.title == "Solo Leveling")
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
