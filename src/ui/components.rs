@@ -235,6 +235,9 @@ pub fn render_series_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Them
         )
         .highlight_style(theme.selected_item());
 
+    // Cache the visible row count (borders excluded) so `zz` can center the selection.
+    app.series_view_height = usize::from(area.height.saturating_sub(2));
+
     f.render_stateful_widget(list, area, &mut app.series_state);
 }
 
@@ -420,6 +423,9 @@ pub fn render_chapters_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Th
                 )),
         )
         .row_highlight_style(theme.selected_item());
+
+    // Cache the visible row count (borders + header excluded) so `zz` can center the selection.
+    app.chapters_view_height = usize::from(area.height.saturating_sub(3));
 
     f.render_stateful_widget(table, area, &mut app.chapters_state);
 }
@@ -1089,10 +1095,10 @@ pub fn render_help_modal(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  g / G                 ",
+                "  g / G / zz            ",
                 Style::default().fg(theme.warning),
             ),
-            Span::raw("Jump to top / bottom of active list"),
+            Span::raw("Jump to top / bottom, or center the selected item"),
         ]),
         Line::from(vec![
             Span::styled(

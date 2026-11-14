@@ -270,11 +270,17 @@ pub struct App {
     pub series_list: Vec<SeriesWithStats>,
     pub selected_series_idx: usize,
     pub series_state: ListState,
+    /// Visible row count of the series pane from the last frame, for `zz` centering.
+    pub series_view_height: usize,
 
     pub all_chapters: Vec<ChapterWithProgress>,
     pub chapters_list: Vec<ChapterWithProgress>,
     pub selected_chapter_idx: usize,
     pub chapters_state: TableState,
+    /// Visible row count of the chapters pane from the last frame, for `zz` centering.
+    pub chapters_view_height: usize,
+    /// A leading `z` was pressed; the next key completes or cancels the `zz` sequence.
+    pub pending_z: bool,
     pub chapter_filter: ChapterFilter,
 
     pub input_mode: InputMode,
@@ -362,10 +368,13 @@ impl App {
             series_list: Vec::new(),
             selected_series_idx: 0,
             series_state,
+            series_view_height: 0,
             all_chapters: Vec::new(),
             chapters_list: Vec::new(),
             selected_chapter_idx: 0,
             chapters_state,
+            chapters_view_height: 0,
+            pending_z: false,
             chapter_filter: ChapterFilter::All,
             input_mode: InputMode::Normal,
             search_query: String::new(),
@@ -1759,6 +1768,39 @@ impl App {
         // Clean up any stale background tasks running for more than 120s
         self.download_jobs
             .retain(|j| j.started_at.elapsed() < Duration::from_secs(120));
+    }
+
+    /// `zz`: center the selected row in the active list, Vim style.
+    pub fn center_selected(&mut self) {
+        self.clear_pending_deletes();
+        match self.active_pane {
+            ActivePane::SeriesList => {
+                *self.series_state.offset_mut() = Self::center_offset(
+                    self.selected_series_idx,
+                    self.filtered_indices.len(),
+                    self.series_view_height,
+                );
+            }
+            ActivePane::ChaptersList => {
+                *self.chapters_state.offset_mut() = Self::center_offset(
+                    self.selected_chapter_idx,
+                    self.chapters_list.len(),
+                    self.chapters_view_height,
+                );
+            }
+            ActivePane::ActiveDownloads => {}
+        }
+    }
+
+    /// First visible row that puts `selected` in the middle of `height` rows,
+    /// clamped so the list never scrolls past its end (as Vim's `zz` does).
+    fn center_offset(selected: usize, len: usize, height: usize) -> usize {
+        if height == 0 {
+            return 0;
+        }
+        selected
+            .saturating_sub(height / 2)
+            .min(len.saturating_sub(height))
     }
 
     pub fn next_item(&mut self) {
@@ -3429,6 +3471,96 @@ mod tests {
         assert_eq!(app.selected_chapter_idx, app.chapters_list.len() - 1);
         app.jump_list_top();
         assert_eq!(app.selected_chapter_idx, 0);
+    }
+
+    #[test]
+    fn center_selected_survives_a_render() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = test_app();
+        app.active_pane = ActivePane::ChaptersList;
+        let mut terminal = Terminal::new(TestBackend::new(120, 11)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let len = app.chapters_list.len();
+        let view = app.chapters_view_height;
+        assert!(view > 0 && view + 2 <= len, "view {view} of {len}");
+
+        // A row that can genuinely sit mid-screen (not clamped by the list end).
+        let selected = len / 2;
+        app.select_chapter_index(selected);
+        app.center_selected();
+        let centered = app.chapters_state.offset();
+        assert_eq!(centered, selected - view / 2);
+
+        // Redrawing must not undo the centering.
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.chapters_state.offset(), centered);
+
+        // The selected row is drawn on the middle line of the table's rows,
+        // which is one border + one header row below the pane's top.
+        let rect = app.chapters_rect.expect("chapters pane rect");
+        let selected_row = rect.y + 2 + (selected - centered) as u16;
+        let width = terminal.backend().buffer().area.width as usize;
+        let row_text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i / width == selected_row as usize)
+            .map(|(_, c)| c.symbol())
+            .collect();
+        assert!(
+            row_text.contains(&format!(
+                "Ch. {}",
+                crate::db::models::format_chapter_number(
+                    app.chapters_list[selected].chapter.chapter_number
+                )
+            )),
+            "row {selected_row}: {row_text:?}"
+        );
+        assert!(row_text.contains('▶'), "selected row must be highlighted");
+    }
+
+    #[test]
+    fn center_offset_centers_and_clamps_to_list_end() {
+        assert_eq!(App::center_offset(0, 100, 10), 0);
+        assert_eq!(App::center_offset(50, 100, 10), 45);
+        // Near the end the list cannot scroll past its last screen.
+        assert_eq!(App::center_offset(99, 100, 10), 90);
+        // Taller viewport than list, and nothing rendered yet.
+        assert_eq!(App::center_offset(2, 3, 20), 0);
+        assert_eq!(App::center_offset(5, 10, 0), 0);
+    }
+
+    #[test]
+    fn center_selected_scrolls_the_active_pane() {
+        let mut app = test_app();
+        app.select_series_index(0);
+        app.active_pane = ActivePane::ChaptersList;
+        let len = app.chapters_list.len();
+        assert!(len > 4, "seed data should give more than one screen");
+
+        // Whole list fits: the offset stays at the top.
+        app.chapters_view_height = len + 2;
+        app.select_chapter_index(len - 1);
+        app.center_selected();
+        assert_eq!(app.chapters_state.offset(), 0);
+
+        // Short viewport: the selected row ends up on the middle line.
+        app.chapters_view_height = 3;
+        app.select_chapter_index(len - 1);
+        app.center_selected();
+        assert_eq!(app.chapters_state.offset(), len - 3);
+
+        // Series pane is centered the same way.
+        app.active_pane = ActivePane::SeriesList;
+        app.series_view_height = 1;
+        app.jump_list_bottom();
+        app.center_selected();
+        assert_eq!(app.series_state.offset(), app.filtered_indices.len() - 1);
     }
 
     #[test]

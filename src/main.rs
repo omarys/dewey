@@ -485,6 +485,19 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
+                    // Vim-style `zz`: the previous key was the `z` prefix. Any other key
+                    // cancels the sequence and is handled normally.
+                    if app.pending_z {
+                        app.pending_z = false;
+                        if matches!(
+                            (key.code, key.modifiers),
+                            (KeyCode::Char('z'), KeyModifiers::NONE)
+                        ) {
+                            app.center_selected();
+                            continue;
+                        }
+                    }
+
                     match (key.code, key.modifiers) {
                         (KeyCode::Char('c'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('q'), KeyModifiers::NONE) => {
@@ -527,6 +540,9 @@ async fn main() -> Result<()> {
                         }
                         (KeyCode::Char('G'), _) => {
                             app.jump_list_bottom();
+                        }
+                        (KeyCode::Char('z'), KeyModifiers::NONE) => {
+                            app.pending_z = true;
                         }
                         (KeyCode::Tab, _)
                         | (KeyCode::Right, _)

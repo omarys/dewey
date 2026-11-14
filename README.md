@@ -79,6 +79,7 @@ Dewey acts as the central orchestration "brain" between your local library, read
 | <kbd>j</kbd> / <kbd>↓</kbd> | **Down** | Navigate to the next series or chapter |
 | <kbd>k</kbd> / <kbd>↑</kbd> | **Up** | Navigate to the previous series or chapter |
 | <kbd>g</kbd> / <kbd>G</kbd> | **Jump Top / Bottom** | Jump to the first / last item of the active list |
+| <kbd>z</kbd><kbd>z</kbd> | **Center** | Center the selected series / chapter in the middle of the active list |
 | <kbd>Tab</kbd> / <kbd>l</kbd> / <kbd>→</kbd> | **Next Pane** | Switch focus between Series List and Chapters List |
 | <kbd>Shift+Tab</kbd> / <kbd>h</kbd> / <kbd>←</kbd> | **Prev Pane** | Switch focus backwards |
 | <kbd>Enter</kbd> | **Read / Fetch** | Open chapter in Continuum (or fetch via Labrador if missing) |
