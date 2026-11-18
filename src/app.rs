@@ -864,6 +864,26 @@ impl App {
     /// library twice, once as a comic and once as a light novel, so a matching
     /// title alone must not block an add. Sub-shelves do not split a comic in two.
     /// A shared `fetch_url` always means the same series.
+    /// Shelf for a series added from Labrador. Novel-only providers
+    /// (novelarchive, novelping) always shelve as Light Novel whatever filter
+    /// is active — the default `All` filter would otherwise file the novel as
+    /// a comic and fork a duplicate entry that only holds the fetched
+    /// chapters.
+    fn category_for_new_series(filter: TypeFilter, url: &str) -> Option<String> {
+        if url.contains("novelarchive") || url.contains("novelping") {
+            return Some(crate::scanner::LIGHT_NOVEL_CATEGORY.to_string());
+        }
+        match filter {
+            TypeFilter::Manga => Some("Manga".to_string()),
+            TypeFilter::Manhwa => Some("Manhwa".to_string()),
+            TypeFilter::Comicbook => Some("Comicbook".to_string()),
+            // A remote series is fetched as image chapters by Labrador, so
+            // a light novel filter still files it under its own shelf.
+            TypeFilter::LightNovel => Some(crate::scanner::LIGHT_NOVEL_CATEGORY.to_string()),
+            TypeFilter::All => Some("Manga".to_string()),
+        }
+    }
+
     fn find_series_on_shelf(
         series_list: &[crate::db::models::SeriesWithStats],
         title: &str,
@@ -2350,15 +2370,7 @@ impl App {
                 info!(%info.title, %info.url, ?info.provider, "Selected series from Labrador");
 
                 // 1. Determine category and reading mode
-                let category = match self.type_filter {
-                    TypeFilter::Manga => Some("Manga".to_string()),
-                    TypeFilter::Manhwa => Some("Manhwa".to_string()),
-                    TypeFilter::Comicbook => Some("Comicbook".to_string()),
-                    // A remote series is fetched as image chapters by Labrador, so
-                    // a light novel filter still files it under its own shelf.
-                    TypeFilter::LightNovel => Some("Light Novel".to_string()),
-                    TypeFilter::All => Some("Manga".to_string()),
-                };
+                let category = Self::category_for_new_series(self.type_filter, &info.url);
                 let reading_mode = if info.url.contains("mangakatana")
                     || info.url.contains("weebcentral")
                     || info.url.contains("mangadistrict")
@@ -2379,6 +2391,19 @@ impl App {
                 );
 
                 if let Some(id) = existing_id {
+                    // Re-adding is also how a scanned entry gets its fetch URL:
+                    // attach the selection instead of dropping it, so future
+                    // downloads land on the existing entry rather than forking
+                    // a duplicate that only holds the fetched chapters.
+                    if let Some(s) = self.series_list.iter().find(|s| s.series.id == id) {
+                        if s.series.fetch_url.is_none() {
+                            self.db.update_series_fetch_url(id, &info.url)?;
+                            if let Some(s) = self.series_list.iter_mut().find(|s| s.series.id == id)
+                            {
+                                s.series.fetch_url = Some(info.url.clone());
+                            }
+                        }
+                    }
                     if let Some(pos) = self.series_list.iter().position(|s| s.series.id == id) {
                         self.selected_series_idx = pos;
                         let _ = self.reload_chapters();
@@ -4044,6 +4069,62 @@ mod tests {
             .filter(|s| s.series.title == "Shadow Slave")
             .count();
         assert_eq!(titles, 2, "both shelves show up in the library");
+    }
+
+    #[test]
+    fn novel_providers_default_to_the_light_novel_shelf() {
+        // Novel-only providers shelve as Light Novel regardless of filter.
+        assert_eq!(
+            App::category_for_new_series(TypeFilter::All, "https://novelping.com/novel/x"),
+            Some("Light Novel".to_string())
+        );
+        assert_eq!(
+            App::category_for_new_series(TypeFilter::Manga, "https://novelarchive.st/series/x"),
+            Some("Light Novel".to_string())
+        );
+        // Comic providers keep the filter-derived shelf.
+        assert_eq!(
+            App::category_for_new_series(TypeFilter::All, "https://mangakatana.com/manga/x"),
+            Some("Manga".to_string())
+        );
+        assert_eq!(
+            App::category_for_new_series(TypeFilter::Manhwa, "https://example.test/a"),
+            Some("Manhwa".to_string())
+        );
+        assert_eq!(
+            App::category_for_new_series(TypeFilter::Comicbook, "https://example.test/a"),
+            Some("Comicbook".to_string())
+        );
+        assert_eq!(
+            App::category_for_new_series(TypeFilter::LightNovel, "https://example.test/a"),
+            Some("Light Novel".to_string())
+        );
+    }
+
+    #[test]
+    fn an_all_filter_add_of_a_novel_reuses_the_light_novel_entry() {
+        let mut app = test_app();
+        let ln = app
+            .db
+            .insert_or_get_series_full("Shadow Slave", None, false, Some("Light Novel"))
+            .unwrap();
+        app.reload_series().unwrap();
+
+        let wanted = App::category_for_new_series(
+            TypeFilter::All,
+            "https://novelping.com/novel/shadow-slave",
+        )
+        .unwrap();
+        assert_eq!(
+            App::find_series_on_shelf(
+                &app.series_list,
+                "Shadow Slave",
+                Some(&wanted),
+                "https://novelping.com/novel/shadow-slave"
+            ),
+            Some(ln),
+            "adding a novelping series under the All filter must not fork a duplicate"
+        );
     }
 
     #[test]
