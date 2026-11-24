@@ -808,6 +808,7 @@ impl LibraryScanner {
                     if let Ok(archive) = zip::ZipArchive::new(file) {
                         let count = archive
                             .file_names()
+                            .filter_map(Result::ok)
                             .filter(|name| {
                                 let lower = name.to_lowercase();
                                 lower.ends_with(".jpg")
